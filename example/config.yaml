@@ -1,0 +1,58 @@
+model:
+    target: example.src.resnet50
+    params:
+        n_classes: 10
+    input_map: [[0, 0]]
+    optimizing_key: fc
+datasets:
+    train:
+        target: example.src.cifar10
+        params:
+            root: data
+            split: train
+            img_norm_mean: [0.485, 0.456, 0.406]
+            img_norm_std: [0.229, 0.224, 0.225]
+    val:
+        target: example.src.cifar10
+        params:
+            root: data
+            split: val
+            img_norm_mean: [0.485, 0.456, 0.406]
+            img_norm_std: [0.229, 0.224, 0.225]
+augmentors:
+    blind:
+        target: example.src.CIFAR10Augmentor
+        params:
+            size: 224
+optimizer:
+    target: torch.optim.Adam
+    params:
+        lr: 1.0e-3
+        weight_decay: 1.0e-6
+lr_scheduler:
+    target: mt_pipe.lr_scheduler.CosineAnnealingLRWithConstant
+    params:
+        T_max: 100
+        eta_min: 1.0e-6
+loss_fn:
+    target: torch.nn.CrossEntropyLoss
+    input_map: [[1], [0, 1]]
+    tensor_loss_map: []
+    plotter_map: { tot: [0] }
+evaluator:
+    target: mt_pipe.evaluators.Classification
+    params:
+        top_k: [1, 2, 3, 5]
+    input_map: [[1], [0, 1], [0, 0]]
+train:
+    dataset: train
+    batch_size: 32
+    tollerance: 10
+    augmentor: blind
+val:
+    dataset: val
+    batch_size: 32
+test:
+    dataset: val
+    batch_size: 32
+epochs: 2

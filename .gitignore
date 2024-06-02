@@ -1,0 +1,11 @@
+*.py[cod]
+*.pth
+*.pt
+
+/data
+/weights
+/dependencies
+/mt_pipe.egg-info
+/out
+
+/temp**

@@ -1,0 +1,8 @@
+pyyaml
+omegaconf
+torch
+torchvision
+tensorboard
+matplotlib
+tqdm
+opencv-python
