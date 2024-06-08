@@ -73,6 +73,12 @@ def parse_args():
         default=False,
         help="Resumption even when the configuration is different from the previous",
     )
+    parser.add_argument(
+        "--visualize-every",
+        type=int,
+        default=-1,
+        help="Visualize after every this much iterations. Default: visualize after every epoch.",
+    )
     args = parser.parse_args()
     return args
 
@@ -94,6 +100,7 @@ def main():
         device=args.device,
         analysis_level=args.analysis,
         verbose_level=args.verbose,
+        visualize_every=args.visualize_every,
     )
     trainer.fit()
 

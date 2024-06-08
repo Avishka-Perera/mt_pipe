@@ -28,6 +28,7 @@ from .utils import (
 )
 from .data import to_device_deep, get_collate_func
 from ..evaluators import Evaluator
+from ..visualizers import Visualizer
 from .logger import Logger
 
 
@@ -45,6 +46,7 @@ class Trainer:
         device: int,
         analysis_level: int,
         verbose_level: int,
+        visualize_every: int,
     ) -> None:
         do_grad_analysis = analysis_level >= 2
         do_loss_analysis = analysis_level >= 1
@@ -172,6 +174,26 @@ class Trainer:
             eval_input_mapper: Callable = None
         if "augmentors" in conf:
             augmentors = {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
+        visualizers: Dict[str, Visualizer] = (
+            {
+                k: make_obj_from_conf(v, _writer=logger.writer)
+                for k, v in conf.visualizers.items()
+            }
+            if "visualizers" in conf
+            else {}
+        )
+        visualize_mappers: Dict[str, Callable] = (
+            {
+                k: (
+                    get_input_mapper(v.input_map)
+                    if "input_map" in v
+                    else get_input_mapper()
+                )
+                for k, v in conf.visualizers.items()
+            }
+            if "visualizers" in conf
+            else {}
+        )
 
         # data
         def make_dl(loop_conf) -> DataLoader:
@@ -211,6 +233,9 @@ class Trainer:
         self.lr_scheduler = lr_scheduler
         self.evaluator = evaluator
         self.eval_input_mapper = eval_input_mapper
+        self.visualizers = visualizers
+        self.visualize_mappers = visualize_mappers
+        self.visualize_every = visualize_every
         self.train_dl = train_dl
         self.val_dl = val_dl
         self.test_dl = test_dl
