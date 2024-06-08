@@ -300,11 +300,7 @@ class Trainer:
                 for k, v in conf.visualizers.items()
             }
             if "visualizers" in conf
-            else (
-                {"default": make_obj_from_conf(conf.visualizer, _writer=logger.writer)}
-                if "visualizer" in conf
-                else {}
-            )
+            else {}
         )
         visualizer_mappers: Dict[str, Callable] = (
             {
@@ -316,29 +312,27 @@ class Trainer:
                 for k, v in conf.visualizers.items()
             }
             if "visualizers" in conf
-            else (
-                {
-                    "default": get_input_mapper(
-                        conf.visualizer.input_map
-                        if "input_map" in conf.visualizer
-                        else None
-                    )
-                }
-                if "visualizer" in conf
-                else {}
-            )
+            else {}
         )
         if len(visualizers) != 0:
-            train_visualizer_k = (
-                conf.train.visualizer if "visualizer" in conf.train else "default"
+            train_visualizer = (
+                visualizers[conf.train.visualizer]
+                if "visualizer" in conf.train
+                else None
             )
-            val_visualizer_k = (
-                conf.val.visualizer if "visualizer" in conf.val else "default"
+            val_visualizer = (
+                visualizers[conf.val.visualizer] if "visualizer" in conf.val else None
             )
-            train_visualizer = visualizers[train_visualizer_k]
-            val_visualizer = visualizers[val_visualizer_k]
-            train_visualizer_mapper = visualizer_mappers[train_visualizer_k]
-            val_visualizer_mapper = visualizer_mappers[val_visualizer_k]
+            train_visualizer_mapper = (
+                visualizer_mappers[conf.train.visualizer]
+                if "visualizer" in conf.train
+                else None
+            )
+            val_visualizer_mapper = (
+                visualizer_mappers[conf.val.visualizer]
+                if "visualizer" in conf.val
+                else None
+            )
         else:
             train_visualizer = None
             val_visualizer = None
