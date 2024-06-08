@@ -169,26 +169,6 @@ class Trainer:
             eval_input_mapper: Callable = None
         if "augmentors" in conf:
             augmentors = {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
-        visualizers: Dict[str, Visualizer] = (
-            {
-                k: make_obj_from_conf(v, _writer=logger.writer)
-                for k, v in conf.visualizers.items()
-            }
-            if "visualizers" in conf
-            else {}
-        )
-        visualize_mappers: Dict[str, Callable] = (
-            {
-                k: (
-                    get_input_mapper(v.input_map)
-                    if "input_map" in v
-                    else get_input_mapper()
-                )
-                for k, v in conf.visualizers.items()
-            }
-            if "visualizers" in conf
-            else {}
-        )
 
         # data
         def make_dl(loop_conf) -> DataLoader:
@@ -208,6 +188,13 @@ class Trainer:
         train_dl = make_dl(conf.train)
         val_dl = make_dl(conf.val) if do_val else None
         test_dl = make_dl(conf.test) if do_test else None
+
+        (
+            train_visualizer,
+            val_visualizer,
+            train_visualizer_mapper,
+            val_visualizer_mapper,
+        ) = self.load_visualizers(conf, logger)
 
         # additional checkpoints
         self.checkpoints = (
@@ -232,8 +219,10 @@ class Trainer:
         self.lr_scheduler = lr_scheduler
         self.evaluator = evaluator
         self.eval_input_mapper = eval_input_mapper
-        self.visualizers = visualizers
-        self.visualize_mappers = visualize_mappers
+        self.train_visualizer = train_visualizer
+        self.val_visualizer = val_visualizer
+        self.train_visualizer_mapper = train_visualizer_mapper
+        self.val_visualizer_mapper = val_visualizer_mapper
         self.visualize_every = visualize_every
         self.train_dl = train_dl
         self.val_dl = val_dl
@@ -296,13 +285,73 @@ class Trainer:
         )
         return loss_fn, loss_input_mapper
 
+    def load_visualizers(self, conf, logger):
+        visualizers: Dict[str, Visualizer] = (
+            {
+                k: make_obj_from_conf(v, _writer=logger.writer)
+                for k, v in conf.visualizers.items()
+            }
+            if "visualizers" in conf
+            else (
+                {"default": make_obj_from_conf(conf.visualizer, _writer=logger.writer)}
+                if "visualizer" in conf
+                else {}
+            )
+        )
+        visualizer_mappers: Dict[str, Callable] = (
+            {
+                k: (
+                    get_input_mapper(v.input_map)
+                    if "input_map" in v
+                    else get_input_mapper()
+                )
+                for k, v in conf.visualizers.items()
+            }
+            if "visualizers" in conf
+            else (
+                {
+                    "default": get_input_mapper(
+                        conf.visualizer.input_map
+                        if "input_map" in conf.visualizer
+                        else None
+                    )
+                }
+                if "visualizer" in conf
+                else {}
+            )
+        )
+        if len(visualizers) != 0:
+            train_visualizer_k = (
+                conf.train.visualizer if "visualizer" in conf.train else "default"
+            )
+            val_visualizer_k = (
+                conf.val.visualizer if "visualizer" in conf.val else "default"
+            )
+            train_visualizer = visualizers[train_visualizer_k]
+            val_visualizer = visualizers[val_visualizer_k]
+            train_visualizer_mapper = visualizer_mappers[train_visualizer_k]
+            val_visualizer_mapper = visualizer_mappers[val_visualizer_k]
+        else:
+            train_visualizer = None
+            val_visualizer = None
+            train_visualizer_mapper = None
+            val_visualizer_mapper = None
+
+        return (
+            train_visualizer,
+            val_visualizer,
+            train_visualizer_mapper,
+            val_visualizer_mapper,
+        )
+
     def write_to_report(self, txt: str, end: str = "\n\n") -> None:
         self.report.write(txt + end)
 
-    def model_pre(self, model_in, epoch, batch_id):
+    def model_in_pre(self, model_in, epoch, batch_id):
         return model_in
 
     def train_loop(self, epoch: int) -> float:
+        self.model.train()
         losses = []
         for batch_id, batch in tqdm.tqdm(
             enumerate(self.train_dl),
@@ -313,7 +362,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
-            model_in = self.model_pre(model_in, epoch, batch_id)
+            model_in = self.model_in_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
@@ -348,6 +397,17 @@ class Trainer:
                     last_lr,
                     epoch * len(self.train_dl) + batch_id,
                 )
+            if (
+                self.visualize_every != -1 and batch_id % self.visualize_every == 0
+            ) or (self.visualize_every == -1 and batch_id == len(self.train_dl) - 1):
+                visualizer_in = self.train_visualizer_mapper(
+                    batch=batch, model_out=model_out, epoch=epoch, loop="train"
+                )
+                (
+                    self.train_visualizer(**visualizer_in)
+                    if isinstance(visualizer_in, dict)
+                    else self.train_visualizer(*visualizer_in)
+                )
             self.logger.batch_step()
 
         train_loss = sum(losses) / len(losses)
@@ -367,7 +427,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
-            model_in = self.model_pre(model_in, epoch, batch_id)
+            model_in = self.model_in_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
@@ -384,6 +444,17 @@ class Trainer:
             loss = self.optim_loss_mapper(loss_out=loss_out)
             loss = tuple(loss.values())[0] if type(loss) == dict else loss[0]
             losses.append(loss.item())
+            if (
+                self.visualize_every != -1 and batch_id % self.visualize_every == 0
+            ) or (self.visualize_every == -1 and batch_id == len(self.val_dl) - 1):
+                visualizer_in = self.val_visualizer_mapper(
+                    batch=batch, model_out=model_out, epoch=epoch, loop="val"
+                )
+                (
+                    self.val_visualizer(**visualizer_in)
+                    if isinstance(visualizer_in, dict)
+                    else self.val_visualizer(*visualizer_in)
+                )
 
         self.model.train()
         val_loss = sum(losses) / len(losses)
@@ -403,7 +474,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
-            model_in = self.model_pre(model_in, epoch, batch_id)
+            model_in = self.model_in_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
