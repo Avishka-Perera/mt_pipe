@@ -48,11 +48,96 @@ class Trainer:
         verbose_level: int,
         visualize_every: int,
     ) -> None:
+
+        conf = self.load_config(
+            default_conf_path, conf_override_path, inline_conf_overrides
+        )
+
+        do_val = "val" in conf
+        do_test = "test" in conf
         do_grad_analysis = analysis_level >= 2
         do_loss_analysis = analysis_level >= 1
         logger = Logger(verbose_level=verbose_level, do_loss_analysis=do_loss_analysis)
 
-        # load configurations
+        logger.info(f"-- CONFIG --\n{dump_conf(conf)}\n")
+
+        # initialize output
+        (
+            results_dir,
+            ckpts_dir,
+            best_ckpt_path,
+            final_ckpt_path,
+            report,
+            loss_evol_path_csv,
+            loss_evol_path_img,
+            resumption_id,
+        ) = self.init_output(conf, args, out_dir, resume, logger)
+
+        # prepare objects
+        train_dl, val_dl, test_dl = self.load_dataloaders(conf, do_val, do_test)
+        model, model_input_mapper, optimizing_model = self.load_model(conf, device)
+        if do_grad_analysis:
+            logger.init_gradient_analyzer(optimizing_model)
+        loss_fn, loss_input_mapper = self.load_loss_fns(conf)
+        optim_loss_mapper, optimizer = self.load_optimizer(conf, optimizing_model)
+        lr_scheduler = self.load_lr_scheduler(conf, optimizer)
+        (
+            train_visualizer,
+            val_visualizer,
+            train_visualizer_mapper,
+            val_visualizer_mapper,
+        ) = self.load_visualizers(conf, logger)
+        evaluator, eval_input_mapper = self.load_evaluator(conf, do_test, results_dir)
+
+        # resume training
+        start_epoch, loss_evol = self.resume(
+            conf,
+            resume,
+            force_resume,
+            out_dir,
+            resumption_id,
+            final_ckpt_path,
+            loss_evol_path_csv,
+            logger,
+        )
+
+        self.do_val = do_val
+        self.do_test = do_test
+        self.do_grad_analysis = do_grad_analysis
+        self.do_loss_analysis = do_loss_analysis
+        self.logger = logger
+        self.device = device
+        self.model = model
+        self.model_input_mapper = model_input_mapper
+        self.loss_fn = loss_fn
+        self.loss_input_mapper = loss_input_mapper
+        self.optim_loss_mapper = optim_loss_mapper
+        self.optimizing_model = optimizing_model
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.evaluator = evaluator
+        self.eval_input_mapper = eval_input_mapper
+        self.train_visualizer = train_visualizer
+        self.val_visualizer = val_visualizer
+        self.train_visualizer_mapper = train_visualizer_mapper
+        self.val_visualizer_mapper = val_visualizer_mapper
+        self.visualize_every = visualize_every
+        self.train_dl = train_dl
+        self.val_dl = val_dl
+        self.test_dl = test_dl
+        self.epochs = conf.epochs
+        self.tollerance = conf.train.tollerance if "tollerance" in conf.train else None
+        self.ckpts_dir = ckpts_dir
+        self.best_ckpt_path = best_ckpt_path
+        self.final_ckpt_path = final_ckpt_path
+        self.results_dir = results_dir
+        self.report = report
+        self.loss_evol_path_csv = loss_evol_path_csv
+        self.loss_evol_path_img = loss_evol_path_img
+        self.start_epoch = start_epoch
+        self.loss_evol = loss_evol
+
+    def load_config(self, default_conf_path, conf_override_path, inline_conf_overrides):
         if default_conf_path is None:
             default_conf = DictConfig({})
         else:
@@ -83,23 +168,18 @@ class Trainer:
             for k, v in inline_conf_overrides.items():
                 set_deep_key(conf, k, v)
 
-        logger.info(f"-- CONFIG --\n{dump_conf(conf)}\n")
+        return conf
 
-        do_val = "val" in conf
-        do_test = "test" in conf
-
-        model, model_input_mapper, optimizing_model = self.load_model(conf, device)
-
-        # initialize output
+    def init_output(self, conf, args, out_dir, resume, logger):
         tblog_dir = ospj(out_dir, "tblogs")
         ckpts_dir = ospj(out_dir, "ckpt")
+        best_ckpt_path = ospj(ckpts_dir, "best.ckpt")
+        final_ckpt_path = ospj(ckpts_dir, "final.ckpt")
         results_dir = ospj(out_dir, "results")
         for path in [tblog_dir, ckpts_dir, results_dir]:
             if not os.path.exists(path):
                 os.makedirs(path)
         logger.init_plotter(tblog_dir)
-        if do_grad_analysis:
-            logger.init_gradient_analyzer(optimizing_model)
         if resume:
             resumption_id = len(glob.glob(f"{out_dir}/args*.yaml"))
             if resumption_id == 0:
@@ -113,9 +193,11 @@ class Trainer:
             args_save_path = ospj(out_dir, f"args.yaml")
             conf_save_path = ospj(out_dir, f"conf.yaml")
             info_mode = "w"
+            resumption_id = None
         loss_evol_path_csv = ospj(out_dir, f"loss.csv")
         loss_evol_path_img = ospj(out_dir, f"loss.jpg")
         report_path = ospj(results_dir, "report.txt")
+        report = open(report_path, "a")
         info.append(f"Start: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         info = "\n".join(info)
         info_save_path = ospj(out_dir, "info.txt")
@@ -124,53 +206,31 @@ class Trainer:
         dump_conf(args, args_save_path)
         dump_conf(conf, conf_save_path)
 
-        # prepare objects
-        # train objects
-        loss_fn, loss_input_mapper = self.load_loss_fns(conf)
-        optim_loss_mapper: Callable = (
-            get_input_mapper(conf.optimizer.loss_map)
-            if "loss_map" in conf.optimizer
-            else get_input_mapper(None)
+        # additional checkpoints
+        self.checkpoints = (
+            {e: ospj(ckpts_dir, f"{e}.ckpt") for e in conf.checkpoints}
+            if "checkpoints" in conf
+            else {}
         )
-        optimizer: Optimizer = make_obj_from_conf(
-            conf.optimizer, params=optimizing_model.parameters()
-        )
-        if "lr_scheduler" in conf:
-            lr_scheduler: LRScheduler = make_obj_from_conf(
-                conf.lr_scheduler, optimizer=optimizer
-            )
-        else:
-            lr_scheduler = None
-        if do_test:
-            norm_ds_params = conf.datasets[conf.test.dataset].params
-            norm_mean = (
-                norm_ds_params.img_norm_mean
-                if "img_norm_mean" in norm_ds_params
-                else [0, 0, 0]
-            )
-            norm_std = (
-                norm_ds_params.img_norm_std
-                if "img_norm_std" in norm_ds_params
-                else [1, 1, 1]
-            )
-            evaluator: Evaluator = make_obj_from_conf(
-                conf.evaluator,
-                _result_dir=results_dir,
-                _norm_mean=norm_mean,
-                _norm_std=norm_std,
-            )
-            eval_input_mapper: Callable = (
-                get_input_mapper(conf.evaluator.input_map)
-                if "input_map" in conf.evaluator
-                else get_input_mapper(None)
-            )
-        else:
-            evaluator: Evaluator = None
-            eval_input_mapper: Callable = None
-        if "augmentors" in conf:
-            augmentors = {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
 
-        # data
+        return (
+            results_dir,
+            ckpts_dir,
+            best_ckpt_path,
+            final_ckpt_path,
+            report,
+            loss_evol_path_csv,
+            loss_evol_path_img,
+            resumption_id,
+        )
+
+    def load_dataloaders(self, conf, do_val, do_test):
+        augmentors = (
+            {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
+            if "augmentors" in conf
+            else {}
+        )
+
         def make_dl(loop_conf) -> DataLoader:
             ds = make_obj_from_conf(conf.datasets[loop_conf.dataset])
             aug_conf = conf.augmentors[loop_conf.augmentor]
@@ -188,79 +248,7 @@ class Trainer:
         train_dl = make_dl(conf.train)
         val_dl = make_dl(conf.val) if do_val else None
         test_dl = make_dl(conf.test) if do_test else None
-
-        (
-            train_visualizer,
-            val_visualizer,
-            train_visualizer_mapper,
-            val_visualizer_mapper,
-        ) = self.load_visualizers(conf, logger)
-
-        # additional checkpoints
-        self.checkpoints = (
-            {e: ospj(ckpts_dir, f"{e}.ckpt") for e in conf.checkpoints}
-            if "checkpoints" in conf
-            else {}
-        )
-
-        self.do_val = do_val
-        self.do_test = do_test
-        self.do_grad_analysis = do_grad_analysis
-        self.do_loss_analysis = do_loss_analysis
-        self.logger = logger
-        self.device = device
-        self.model = model
-        self.model_input_mapper = model_input_mapper
-        self.loss_fn = loss_fn
-        self.loss_input_mapper = loss_input_mapper
-        self.optim_loss_mapper = optim_loss_mapper
-        self.optimizing_model = optimizing_model
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.evaluator = evaluator
-        self.eval_input_mapper = eval_input_mapper
-        self.train_visualizer = train_visualizer
-        self.val_visualizer = val_visualizer
-        self.train_visualizer_mapper = train_visualizer_mapper
-        self.val_visualizer_mapper = val_visualizer_mapper
-        self.visualize_every = visualize_every
-        self.train_dl = train_dl
-        self.val_dl = val_dl
-        self.test_dl = test_dl
-        self.epochs = conf.epochs
-        self.tollerance = conf.train.tollerance if "tollerance" in conf.train else None
-        self.ckpts_dir = ckpts_dir
-        self.results_dir = results_dir
-        self.report = open(report_path, "a")
-        self.loss_evol_path_csv = loss_evol_path_csv
-        self.loss_evol_path_img = loss_evol_path_img
-
-        # resume training
-        best_ckpt_path = ospj(ckpts_dir, "best.ckpt")
-        final_ckpt_path = ospj(ckpts_dir, "final.ckpt")
-        if resume:
-            prev_conf_path = (
-                ospj(out_dir, "conf.yaml")
-                if resumption_id == 1
-                else ospj(out_dir, f"conf{resumption_id-1}.yaml")
-            )
-            prev_conf = load_conf(prev_conf_path)
-            if prev_conf != conf and not force_resume:
-                raise ValueError(
-                    "Prervious and current configurations dose not match. Set `--force-resume` to resume anyway"
-                )
-            logger.info(f"Resuming training with checkpoints '{final_ckpt_path}'")
-            start_epoch = self.load_ckpt(final_ckpt_path)
-            if os.path.exists(loss_evol_path_csv):
-                loss_evol = pd.read_csv(loss_evol_path_csv).to_dict("records")
-        else:
-            start_epoch = 0
-            loss_evol = []
-
-        self.start_epoch = start_epoch
-        self.loss_evol = loss_evol
-        self.best_ckpt_path = best_ckpt_path
-        self.final_ckpt_path = final_ckpt_path
+        return train_dl, val_dl, test_dl
 
     def load_model(self, conf, device):
         model: Module = make_obj_from_conf(conf.model).to(device)
@@ -284,6 +272,26 @@ class Trainer:
             else get_input_mapper(None)
         )
         return loss_fn, loss_input_mapper
+
+    def load_optimizer(self, conf, optimizing_model):
+        optim_loss_mapper: Callable = (
+            get_input_mapper(conf.optimizer.loss_map)
+            if "loss_map" in conf.optimizer
+            else get_input_mapper(None)
+        )
+        optimizer: Optimizer = make_obj_from_conf(
+            conf.optimizer, params=optimizing_model.parameters()
+        )
+        return optim_loss_mapper, optimizer
+
+    def load_lr_scheduler(self, conf, optimizer):
+        if "lr_scheduler" in conf:
+            lr_scheduler: LRScheduler = make_obj_from_conf(
+                conf.lr_scheduler, optimizer=optimizer
+            )
+        else:
+            lr_scheduler = None
+        return lr_scheduler
 
     def load_visualizers(self, conf, logger):
         visualizers: Dict[str, Visualizer] = (
@@ -343,6 +351,67 @@ class Trainer:
             train_visualizer_mapper,
             val_visualizer_mapper,
         )
+
+    def load_evaluator(self, conf, do_test, results_dir):
+        if do_test:
+            norm_ds_params = conf.datasets[conf.test.dataset].params
+            norm_mean = (
+                norm_ds_params.img_norm_mean
+                if "img_norm_mean" in norm_ds_params
+                else [0, 0, 0]
+            )
+            norm_std = (
+                norm_ds_params.img_norm_std
+                if "img_norm_std" in norm_ds_params
+                else [1, 1, 1]
+            )
+            evaluator: Evaluator = make_obj_from_conf(
+                conf.evaluator,
+                _result_dir=results_dir,
+                _norm_mean=norm_mean,
+                _norm_std=norm_std,
+            )
+            eval_input_mapper: Callable = (
+                get_input_mapper(conf.evaluator.input_map)
+                if "input_map" in conf.evaluator
+                else get_input_mapper(None)
+            )
+        else:
+            evaluator: Evaluator = None
+            eval_input_mapper: Callable = None
+
+        return evaluator, eval_input_mapper
+
+    def resume(
+        self,
+        conf,
+        resume,
+        force_resume,
+        out_dir,
+        resumption_id,
+        final_ckpt_path,
+        loss_evol_path_csv,
+        logger,
+    ):
+        if resume:
+            prev_conf_path = (
+                ospj(out_dir, "conf.yaml")
+                if resumption_id == 1
+                else ospj(out_dir, f"conf{resumption_id-1}.yaml")
+            )
+            prev_conf = load_conf(prev_conf_path)
+            if prev_conf != conf and not force_resume:
+                raise ValueError(
+                    "Prervious and current configurations dose not match. Set `--force-resume` to resume anyway"
+                )
+            logger.info(f"Resuming training with checkpoints '{final_ckpt_path}'")
+            start_epoch = self.load_ckpt(final_ckpt_path)
+            if os.path.exists(loss_evol_path_csv):
+                loss_evol = pd.read_csv(loss_evol_path_csv).to_dict("records")
+        else:
+            start_epoch = 0
+            loss_evol = []
+        return start_epoch, loss_evol
 
     def write_to_report(self, txt: str, end: str = "\n\n") -> None:
         self.report.write(txt + end)
