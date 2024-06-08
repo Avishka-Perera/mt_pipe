@@ -1,3 +1,5 @@
+"""Logger object"""
+
 import numbers
 from torch.utils.tensorboard import SummaryWriter
 from torch import Tensor
@@ -117,6 +119,8 @@ class Logger:
         self._plot_to_tb(card, val, step)
 
     def plot_loss_pack(self, loss_pack, step, suffix):
+        if type(loss_pack) in [numbers.Number, Tensor]:
+            loss_pack = {"tot": loss_pack}
         if self.do_loss_analysis:
             self._plot_loss_pack_recursive(loss_pack, step, card="", suffix=suffix)
         else:

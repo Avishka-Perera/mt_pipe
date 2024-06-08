@@ -1,4 +1,5 @@
-from ._base import Augmentor
-from .blind import BlindAugmentor
+"""Initialization of the augmentors subpackage"""
 
-__all__ = ["Augmentor", "BlindAugmentor"]
+from ._base import Augmentor
+
+__all__ = ["Augmentor"]

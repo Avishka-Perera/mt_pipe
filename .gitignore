@@ -7,5 +7,7 @@
 /dependencies
 /mt_pipe.egg-info
 /out
+/dist
+/build
 
 /temp**

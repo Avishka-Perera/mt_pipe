@@ -1,85 +1,50 @@
+"""Utility functions"""
+
 import importlib
-import sys
-import os
-import shutil
-import subprocess
-from typing import Sequence, Dict, Callable
+from typing import Sequence, Dict, Callable, List, Iterable
+import re
 import yaml
 from omegaconf import OmegaConf, ListConfig, DictConfig
 
-import torch
-from torch.nn import Module
-from torch.utils.data import default_collate
 
-from .logger import Logger
-
-
-def load_conf(path) -> ListConfig | DictConfig:
-    with open(path) as handler:
+def load_conf(path: str) -> ListConfig | DictConfig:
+    """Loads and returns an omegaconf configuration from YAML/JSON file
+    Arguments
+        1. path: str: Path to the configuration file (YAML/JSON)
+    Returns
+        1. conf: ListConfig | DictConfig: Loaded configuration
+    """
+    with open(path, encoding="utf-8") as handler:
         conf = OmegaConf.create(yaml.load(handler, Loader=yaml.FullLoader))
     return conf
 
 
-def install_dependencies(req_path: str, logger: Logger) -> None:
-    dependency_dir = "./dependencies"
-    if os.path.exists(dependency_dir):
-        shutil.rmtree(dependency_dir)
-    command = [
-        "pip",
-        "install",
-        "--no-deps",
-        "--target",
-        dependency_dir,
-        "-r",
-        req_path,
-    ]
-    logger.info(f"Installing dependencies...")
-    subprocess.run(command, check=True)
-    sys.path.append(dependency_dir)
-
-
-def count_leaves(conf):
-    if isinstance(conf, DictConfig) or isinstance(conf, ListConfig):
-        total_leaves = 0
-        for key, value in conf.items():
-            if isinstance(value, DictConfig) or isinstance(conf, ListConfig):
-                total_leaves += count_leaves(value)
-            else:
-                total_leaves += 1
-        return total_leaves
-    else:
-        return 1
-
-
-def safe_merge(default_weights, defined_weights):
+def dump_conf(conf: DictConfig | ListConfig | Dict | List, path: str = None) -> str:
+    """Converts a configuration into a formatted string. Optionally dumps the string to a file
+    Arguments
+        1. conf: DictConfig | ListConfig | Dict | List: Configuration to be dumped
+        2. path: str = None: Path to dump the formatted string
+    Returns
+        1. conf_str: str: Formatted string of the conf object
     """
-    Validate that merging dict1 with dict2 will not introduce additional leaves to dict1.
-    """
-    dict1_conf = OmegaConf.create(default_weights)
-    dict2_conf = OmegaConf.create(defined_weights)
-    merged_conf = OmegaConf.merge(dict1_conf, dict2_conf)
-
-    if count_leaves(merged_conf) > count_leaves(dict1_conf):
-        raise ValueError(
-            f"Invalid loss_weights definition. Default weights: {default_weights}"
-        )
-
-    return merged_conf
-
-
-def dump_conf(conf, path: str = None):
     if conf.__class__ in [DictConfig, ListConfig]:
         conf = OmegaConf.to_container(conf)
     if path is not None:
-        with open(path, "w") as handler:
-            conf = yaml.dump(conf, handler, indent=4)
+        with open(path, "w", encoding="utf-8") as handler:
+            conf_str = yaml.dump(conf, handler, indent=4)
     else:
-        conf = yaml.dump(conf, indent=4)
-    return conf
+        conf_str = yaml.dump(conf, indent=4)
+    return conf_str
 
 
-def load_class(target):
-    """loads a class using a target"""
+def load_class(target: str) -> type:
+    """loads a class using a target
+    Arguments
+        1. target: str: Path to the target object in the style of python imports
+            e.g.: torch.nn.CrossEntropyLoss
+    Returns
+        1. cls: type: The loaded class pointed by the target
+    """
     *module_name, class_name = target.split(".")
     module_name = ".".join(module_name)
     module = importlib.import_module(module_name)
@@ -87,90 +52,119 @@ def load_class(target):
     return cls
 
 
-def make_obj_from_conf(conf, **kwargs):
+def make_obj_from_conf(conf: Dict | OmegaConf, **additional_params) -> object:
+    """Instantiated an object from its configuration
+    Arguments
+        1. conf: Dict | OmegaConf: Configuration of the object to be instantiated
+            This object will have the following structure
+            ```yaml
+            target: python.like.path.to.class
+            params:
+                key1: value1
+                key2: value2
+            ```
+            Here,
+                the target is a string with a format similar to Python imports
+                params are parameters that will be passed to the object instantiation
+
+        2. **additional_params: Additional parameters to pass to the object instantiation
+    Returns
+        1. obj: object:
+    """
     if isinstance(conf, DictConfig):
         conf = OmegaConf.to_container(conf)
     cls = load_class(conf["target"])
     params = conf["params"] if "params" in conf else {}
-    obj = cls(**params, **kwargs)
+    obj = cls(**params, **additional_params)
     return obj
 
 
-def get_nested_loc(obj, loc):
-    if len(loc) == 0:
-        return obj
+def get_nested_index(par_obj: Iterable, index_arr: Sequence[str | int]) -> object:
+    """Gets the object within a nested iterable by recursing over an index array
+    Arguments
+        1. par_obj: Iterable: Parent object from which the target object must be sampled
+        2. index_arr: Sequence[str | int]: Index array which describes
+            the nested location of the target object
+    Returns
+        1. obj: object: The target object at the nested index of the parent object,
+            whoes position is defined by index_arr
+    """
+    if len(index_arr) == 0:
+        obj = par_obj
     else:
-        return get_nested_loc(obj[loc[0]], loc[1:])
+        obj = get_nested_index(par_obj[index_arr[0]], index_arr[1:])
+    return obj
 
 
-def set_nested_loc(obj, val, loc):
-    """Returns a new object similar to `obj` with the `val` set at `loc`.
+def set_nested_index(
+    obj: Iterable, val: object, index_arr: Sequence[str | int]
+) -> Iterable:
+    """Returns a new object similar to `obj` with the `val` set at `index_arr`.
     This is an unmutating operation
+    Arguments
+        1. obj: Iterable: Nested iterable to which the `val` must be inserted
+        2. val: object: Value that must be inserted to the `obj`
+        3. index_arr: Sequence[str | int]: Position in the nested iterable
+            where the new value must be inserted
+    Returns
+        1. new_obj: Iterable: A new object similar to the `obj`
+            but with the value at `index_arr` replaced by `val`
     """
     if type(obj) in [tuple, list]:
-        return_tuple = type(obj) == tuple
+        return_tuple = isinstance(obj, tuple)
         new_obj = list(obj)
-        if len(loc) == 1:
-            new_obj[loc[0]] = val
+        if len(index_arr) == 1:
+            new_obj[index_arr[0]] = val
         else:
-            new_obj[loc[0]] = set_nested_loc(new_obj[loc[0]], val, loc[1:])
+            new_obj[index_arr[0]] = set_nested_index(
+                new_obj[index_arr[0]], val, index_arr[1:]
+            )
         if return_tuple:
             new_obj = tuple(new_obj)
-    elif type(obj) == dict:
-        new_obj = {k: v for k, v in obj.items()}
-        if len(loc) == 1:
-            new_obj[loc[0]] = val
+    elif isinstance(obj, dict):
+        new_obj = dict(obj.items())
+        if len(index_arr) == 1:
+            new_obj[index_arr[0]] = val
         else:
-            new_obj[loc[0]] = set_nested_loc(new_obj[loc[0]], val, loc[1:])
+            new_obj[index_arr[0]] = set_nested_index(
+                new_obj[index_arr[0]], val, index_arr[1:]
+            )
     else:
         raise TypeError(f"`set_nested()` is not definned for {type(obj)} datatypes")
     return new_obj
 
 
-import re
+def get_nested_attr(par_obj: Iterable, nested_attr: str) -> object:
+    """Gets a nested attribute from and object
+    Arguments
+        1. par_obj: Iterable: Parent object from which the target object must be sampled
+        2. nested_attr: str: Nested attribute name where names are delimited by "."s or indices
+            e.g.: encoder.stages[2].conv.weights
+    Returns
+        1. obj: object: The requested object at the nested location
+    """
+    matches = re.findall(r"\w+|\[\d+\]", nested_attr)
+    attr_lst = [match.strip("[]") for match in matches]
+
+    def get_attr_rec(obj, k_lst):
+        if len(k_lst) == 1:
+            return getattr(obj, k_lst[0])
+        return get_attr_rec(getattr(obj, k_lst[0]), k_lst[1:])
+
+    return get_attr_rec(par_obj, attr_lst)
 
 
-def get_nested_key(obj, key: str):
-    def get_nested_key_rec(obj, key_lst):
-        if len(key_lst) == 1:
-            return getattr(obj, key_lst[0])
-        else:
-            return get_nested_key_rec(getattr(obj, key_lst[0]), key_lst[1:])
-
-    key_lst = re.split(r"\[|\]|\.", key)
-    key_lst = [item for item in key_lst if item]
-
-    return get_nested_key_rec(obj, key_lst)
-
-
-def get_sink_drain_mapper(conf) -> Callable:
+def get_input_mapper(conf: ListConfig | DictConfig | Dict | List) -> Callable:
+    """Created an input mapper"""
     if type(conf) in [ListConfig, DictConfig]:
         conf = OmegaConf.to_container(conf)
-    if type(conf) == dict:
-        return lambda *args: {k: get_nested_loc(args, v) for k, v in conf.items()}
-    if len(conf) == 0:
-        return lambda args: args
-    elif type(conf[0]) == list:
-        return lambda *args: [get_nested_loc(args, v) for v in conf]
-    else:
-        return lambda *args: get_nested_loc(args[0], conf)
+    if isinstance(conf, dict):
+        return lambda **kwargs: {
+            k: get_nested_index(kwargs, v) for k, v in conf.items()
+        }
+    if isinstance(conf, list):
+        return lambda **kwargs: [get_nested_index(kwargs, v) for v in conf]
+    if conf is None:
+        return lambda **kwargs: kwargs
 
-
-def to_device_deep(obj, device):
-    if isinstance(obj, Sequence):
-        return [to_device_deep(o, device) for o in obj]
-    elif isinstance(obj, Dict):
-        return {k: to_device_deep(o, device) for k, o in obj.items()}
-    elif isinstance(obj, torch.Tensor):
-        return obj.to(device)
-    else:
-        return obj
-
-
-def get_collate_func(augmentor) -> Callable:
-    def collate_fn(samples):
-        samples = [augmentor(sample) for sample in samples]
-        batch = default_collate(samples)
-        return batch
-
-    return collate_fn
+    raise ValueError("Invalid input mapper configuration definition")

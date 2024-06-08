@@ -1,3 +1,5 @@
+"""GradientAnalyzer object"""
+
 from torch import nn
 import numpy as np
 from typing import Dict

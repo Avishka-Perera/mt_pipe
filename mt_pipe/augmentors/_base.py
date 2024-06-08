@@ -1,10 +1,12 @@
+"""Base class definition for augmentor objects"""
+
 from abc import abstractmethod
 from typing import List, Dict, Sequence
 
 from torch import Tensor
 from PIL.Image import Image
 
-from ..util import get_nested_loc, set_nested_loc
+from ..util import get_nested_index, set_nested_index
 
 
 class Augmentor:
@@ -23,7 +25,7 @@ class Augmentor:
             return self.process_value(sample)
         else:
             for k in self.keys:
-                val = get_nested_loc(sample, k)
+                val = get_nested_index(sample, k)
                 aug_val = self.process_value(val)
-                sample = set_nested_loc(sample, aug_val, k)
+                sample = set_nested_index(sample, aug_val, k)
             return sample

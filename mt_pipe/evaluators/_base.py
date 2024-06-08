@@ -1,3 +1,5 @@
+"""Base class definition for evaluators"""
+
 from abc import abstractmethod
 from typing import Sequence
 

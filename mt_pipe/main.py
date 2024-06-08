@@ -1,13 +1,19 @@
+"""Entrypoint for mt_pipe executable"""
+
 import os
-from os.path import join as ospj
-from argparse import ArgumentParser, Namespace
-from typing import List
+import sys
+from argparse import ArgumentParser
 
 from mt_pipe.util import Trainer
 from mt_pipe.constants import ANALYSIS_LEVELS, VERBOSITY_LEVELS
 
 
 def parse_args():
+    """Parse commandline arguments
+    Arguments: None
+    Returns:
+        args: Namespace
+    """
     parser = ArgumentParser()
     parser.add_argument(
         "-c",
@@ -15,6 +21,12 @@ def parse_args():
         type=str,
         required=True,
         help="Path to the override configuration. (YAML/JSON)",
+    )
+    parser.add_argument(
+        "--default-config",
+        type=str,
+        default=None,
+        help="Path to the default configuration. (YAML/JSON)",
     )
     parser.add_argument(
         "--inline-conf-overrides",
@@ -32,17 +44,12 @@ def parse_args():
         "-d", "--device", type=int, default=0, help="GPU id that must be utilized"
     )
     parser.add_argument(
-        "--train-encoder",
-        action="store_true",
-        default=False,
-        help="Whether the encoder must also be trained",
-    )
-    parser.add_argument(
         "-a",
         "--analysis",
         type=int,
         default=0,
-        help="The level of analysis to do. 0: no analysis; 1: break loss into parts; 2: break loss into parts and analyze gradients",
+        help="""The level of analysis to do. 0: no analysis; 1: break loss into parts;
+        2: break loss into parts and analyze gradients""",
         choices=ANALYSIS_LEVELS,
     )
     parser.add_argument(
@@ -64,53 +71,31 @@ def parse_args():
         "--force-resume",
         action="store_true",
         default=False,
-        help="Whether to force the resumption when the configuration is different from the previous",
+        help="Resumption even when the configuration is different from the previous",
     )
     args = parser.parse_args()
     return args
 
 
-def main_with_args(
-    args: Namespace,
-    resume: bool,
-    force_resume: bool,
-    out_dir: str,
-    conf_override_path: str,
-    inline_conf_overrides: List[str],
-    device: int,
-    train_encoder: bool,
-    analysis_level: int,
-    verbose_level: int,
-):
-    trainer = Trainer(
-        args=args,
-        resume=resume,
-        force_resume=force_resume,
-        out_dir=out_dir,
-        conf_override_path=conf_override_path,
-        inline_conf_overrides=inline_conf_overrides,
-        device=device,
-        train_encoder=train_encoder,
-        analysis_level=analysis_level,
-        verbose_level=verbose_level,
-    )
-    trainer.fit()
-
-
 def main():
+    """Entrypoint"""
+    cwd = os.path.abspath(os.curdir)
+    sys.path.insert(0, cwd)
     args = parse_args()
-    main_with_args(
+
+    trainer = Trainer(
         args=args,
         resume=args.resume,
         force_resume=args.force_resume,
         out_dir=args.out_dir,
+        default_conf_path=args.default_config,
         conf_override_path=args.config,
         inline_conf_overrides=args.inline_conf_overrides,
         device=args.device,
-        train_encoder=args.train_encoder,
         analysis_level=args.analysis,
         verbose_level=args.verbose,
     )
+    trainer.fit()
 
 
 if __name__ == "__main__":
