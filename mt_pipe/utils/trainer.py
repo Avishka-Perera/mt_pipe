@@ -156,7 +156,7 @@ class Trainer:
         self.val_dl = val_dl
         self.test_dl = test_dl
         self.epochs = conf.epochs
-        self.tollerance = conf.train.tollerance if "tollerance" in conf.train else None
+        self.tollerance = conf.tollerance if "tollerance" in conf else None
         self.ckpts_dir = ckpts_dir
         self.best_ckpt_path = best_ckpt_path
         self.final_ckpt_path = final_ckpt_path
