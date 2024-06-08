@@ -4,7 +4,7 @@ import os
 import sys
 from argparse import ArgumentParser
 
-from mt_pipe.utils import Trainer
+from mt_pipe.utils import Trainer, load_class
 from mt_pipe.constants import ANALYSIS_LEVELS, VERBOSITY_LEVELS
 
 
@@ -42,6 +42,12 @@ def parse_args():
     )
     parser.add_argument(
         "-d", "--device", type=int, default=0, help="GPU id that must be utilized"
+    )
+    parser.add_argument(
+        "--trainer",
+        type=str,
+        default="mt_pipe.utils.Trainer",
+        help="import path to the Trainer object",
     )
     parser.add_argument(
         "-a",
@@ -89,7 +95,8 @@ def main():
     sys.path.insert(0, cwd)
     args = parse_args()
 
-    trainer = Trainer(
+    trainer_cls: Trainer = load_class(args.trainer)
+    trainer = trainer_cls(
         args=args,
         resume=args.resume,
         force_resume=args.force_resume,
