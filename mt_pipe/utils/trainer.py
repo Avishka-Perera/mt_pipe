@@ -126,12 +126,7 @@ class Trainer:
 
         # prepare objects
         # train objects
-        loss_fn: Module = make_obj_from_conf(conf.loss_fn)
-        loss_input_mapper: Callable = (
-            get_input_mapper(conf.loss_fn.input_map)
-            if "input_map" in conf.loss_fn
-            else get_input_mapper(None)
-        )
+        loss_fn, loss_input_mapper = self.load_loss_fns(conf)
         optim_loss_mapper: Callable = (
             get_input_mapper(conf.optimizer.loss_map)
             if "loss_map" in conf.optimizer
@@ -198,8 +193,12 @@ class Trainer:
         # data
         def make_dl(loop_conf) -> DataLoader:
             ds = make_obj_from_conf(conf.datasets[loop_conf.dataset])
+            aug_conf = conf.augmentors[loop_conf.augmentor]
             collate_fn = (
-                get_collate_func(augmentors[loop_conf.augmentor])
+                get_collate_func(
+                    augmentors[loop_conf.augmentor],
+                    aug_conf.post_collate if "post_collate" in aug_conf else False,
+                )
                 if "augmentor" in loop_conf
                 else None
             )
@@ -288,8 +287,20 @@ class Trainer:
         )
         return model, model_input_mapper, optimizing_model
 
+    def load_loss_fns(self, conf):
+        loss_fn: Module = make_obj_from_conf(conf.loss_fn)
+        loss_input_mapper: Callable = (
+            get_input_mapper(conf.loss_fn.input_map)
+            if "input_map" in conf.loss_fn
+            else get_input_mapper(None)
+        )
+        return loss_fn, loss_input_mapper
+
     def write_to_report(self, txt: str, end: str = "\n\n") -> None:
         self.report.write(txt + end)
+
+    def model_pre(self, model_in, epoch, batch_id):
+        return model_in
 
     def train_loop(self, epoch: int) -> float:
         losses = []
@@ -302,6 +313,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
+            model_in = self.model_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
@@ -355,6 +367,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
+            model_in = self.model_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
@@ -378,7 +391,7 @@ class Trainer:
         return val_loss
 
     @torch.no_grad()
-    def test_loop(self) -> str:
+    def test_loop(self, epoch) -> str:
         self.model.eval()
         self.load_ckpt(self.best_ckpt_path)
         for batch_id, batch in tqdm.tqdm(
@@ -390,6 +403,7 @@ class Trainer:
             # forward pass
             batch = to_device_deep(batch, self.device)
             model_in = self.model_input_mapper(batch=batch)
+            model_in = self.model_pre(model_in, epoch, batch_id)
             model_out = (
                 self.model(**model_in)
                 if type(model_in) == dict
@@ -476,14 +490,14 @@ class Trainer:
             if epoch in self.checkpoints:
                 self.save_ckpt(self.checkpoints[epoch], epoch, save_loss)
 
-            if epoch - best_epoch > self.tollerance:
+            if (self.tollerance is not None) and (epoch - best_epoch > self.tollerance):
                 early_stop_msg = f"Best loss observed at epoch {best_epoch}. Stopping early after {self.tollerance} tolerance"
                 self.logger.info(early_stop_msg)
                 self.write_to_report(early_stop_msg)
                 break
 
         if self.do_test:
-            report = self.test_loop()
+            report = self.test_loop(epoch)
             self.logger.info("Results Report:\n\n" + report + "\n\n")
             self.write_to_report("Evaluator report:\n" + report + "\n")
 
