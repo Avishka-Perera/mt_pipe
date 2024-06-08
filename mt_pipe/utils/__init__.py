@@ -1,6 +1,6 @@
 """Initialization of utility subpackage"""
 
-from .util import (
+from .utils import (
     dump_conf,
     load_conf,
     make_obj_from_conf,

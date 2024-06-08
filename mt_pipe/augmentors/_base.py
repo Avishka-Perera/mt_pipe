@@ -6,7 +6,7 @@ from typing import List, Dict, Sequence
 from torch import Tensor
 from PIL.Image import Image
 
-from ..util import get_nested_index, set_nested_index
+from ..utils import get_nested_index, set_nested_index
 
 
 class Augmentor:

@@ -4,7 +4,7 @@ import os
 import sys
 from argparse import ArgumentParser
 
-from mt_pipe.util import Trainer
+from mt_pipe.utils import Trainer
 from mt_pipe.constants import ANALYSIS_LEVELS, VERBOSITY_LEVELS
 
 

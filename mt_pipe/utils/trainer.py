@@ -18,7 +18,7 @@ from torch.nn import Module
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from .util import (
+from .utils import (
     get_yaml_loader,
     load_conf,
     dump_conf,

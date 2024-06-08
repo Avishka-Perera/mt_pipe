@@ -7,7 +7,7 @@ from torch.utils.data import default_collate
 from torch.utils.data import ConcatDataset, Dataset
 from omegaconf import OmegaConf, ListConfig
 
-from .util import make_obj_from_conf
+from .utils import make_obj_from_conf
 
 
 def to_device_deep(obj, device):
