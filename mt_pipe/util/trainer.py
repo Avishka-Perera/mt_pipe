@@ -123,8 +123,6 @@ class Trainer:
         dump_conf(conf, conf_save_path)
 
         # prepare objects
-        # prepare model
-
         # train objects
         loss_fn: Module = make_obj_from_conf(conf.loss_fn)
         loss_input_mapper: Callable = (
@@ -189,6 +187,13 @@ class Trainer:
         train_dl = make_dl(conf.train)
         val_dl = make_dl(conf.val) if do_val else None
         test_dl = make_dl(conf.test) if do_test else None
+
+        # additional checkpoints
+        self.checkpoints = (
+            {e: ospj(ckpts_dir, f"{e}.ckpt") for e in conf.checkpoints}
+            if "checkpoints" in conf
+            else {}
+        )
 
         self.do_val = do_val
         self.do_test = do_test
@@ -408,7 +413,7 @@ class Trainer:
         best_epoch = -1
         for epoch in range(self.start_epoch, self.epochs):
             self.logger.info(
-                f"---- {epoch+1:0{len(str(self.epochs))}}/{self.epochs} ----"
+                f"---- {epoch:0{len(str(self.epochs-1))}}/{self.epochs-1} ----"
             )
             train_loss = self.train_loop(epoch)
             self.logger.plot("LossPerEpoch", "", {"train": train_loss}, epoch)
@@ -442,8 +447,12 @@ class Trainer:
 
             self.logger.epoch_step(epoch)
 
+            # export checkpoints
+            if epoch in self.checkpoints:
+                self.save_ckpt(self.checkpoints[epoch], epoch, save_loss)
+
             if epoch - best_epoch > self.tollerance:
-                early_stop_msg = f"Best loss observed at epoch {best_epoch+1}. Stopping early after {self.tollerance} tolerance"
+                early_stop_msg = f"Best loss observed at epoch {best_epoch}. Stopping early after {self.tollerance} tolerance"
                 self.logger.info(early_stop_msg)
                 self.write_to_report(early_stop_msg)
                 break
