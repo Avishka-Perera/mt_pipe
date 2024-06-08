@@ -3,6 +3,7 @@
 from .utils import (
     dump_conf,
     load_conf,
+    load_class,
     make_obj_from_conf,
     get_nested_index,
     set_nested_index,
@@ -14,6 +15,7 @@ from .logger import Logger
 __all__ = [
     "dump_conf",
     "load_conf",
+    "load_class",
     "make_obj_from_conf",
     "get_nested_index",
     "set_nested_index",

@@ -11,7 +11,7 @@ from .utils import make_obj_from_conf
 
 
 def to_device_deep(obj, device):
-    if isinstance(obj, Sequence):
+    if type(obj) in [list, tuple]:
         return [to_device_deep(o, device) for o in obj]
     elif isinstance(obj, Dict):
         return {k: to_device_deep(o, device) for k, o in obj.items()}
@@ -21,11 +21,20 @@ def to_device_deep(obj, device):
         return obj
 
 
-def get_collate_func(augmentor) -> Callable:
-    def collate_fn(samples):
-        samples = [augmentor(sample) for sample in samples]
-        batch = default_collate(samples)
-        return batch
+def get_collate_func(augmentor, post_collate: bool = False) -> Callable:
+    if post_collate:
+
+        def collate_fn(samples):
+            batch = default_collate(samples)
+            batch = augmentor(batch)
+            return batch
+
+    else:
+
+        def collate_fn(samples):
+            samples = [augmentor(sample) for sample in samples]
+            batch = default_collate(samples)
+            return batch
 
     return collate_fn
 

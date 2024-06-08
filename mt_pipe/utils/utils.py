@@ -173,7 +173,7 @@ def get_nested_attr(par_obj: Iterable, nested_attr: str) -> object:
     return get_attr_rec(par_obj, attr_lst)
 
 
-def get_input_mapper(conf: ListConfig | DictConfig | Dict | List) -> Callable:
+def get_input_mapper(conf: ListConfig | DictConfig | Dict | List = None) -> Callable:
     """Created an input mapper"""
     if type(conf) in [ListConfig, DictConfig]:
         conf = OmegaConf.to_container(conf)
