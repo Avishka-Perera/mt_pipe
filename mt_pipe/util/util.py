@@ -7,6 +7,25 @@ import yaml
 from omegaconf import OmegaConf, ListConfig, DictConfig
 
 
+def get_yaml_loader():
+    yaml_loader = yaml.FullLoader
+    yaml_loader.add_implicit_resolver(
+        "tag:yaml.org,2002:float",
+        re.compile(
+            """^(?:
+     [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+    |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+    |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+    |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+    |[-+]?\\.(?:inf|Inf|INF)
+    |\\.(?:nan|NaN|NAN))$""",
+            re.X,
+        ),
+        list("-+0123456789."),
+    )
+    return yaml_loader
+
+
 def load_conf(path: str) -> ListConfig | DictConfig:
     """Loads and returns an omegaconf configuration from YAML/JSON file
     Arguments
@@ -15,7 +34,7 @@ def load_conf(path: str) -> ListConfig | DictConfig:
         1. conf: ListConfig | DictConfig: Loaded configuration
     """
     with open(path, encoding="utf-8") as handler:
-        conf = OmegaConf.create(yaml.load(handler, Loader=yaml.FullLoader))
+        conf = OmegaConf.create(yaml.load(handler, Loader=get_yaml_loader()))
     return conf
 
 

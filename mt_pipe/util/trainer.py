@@ -19,6 +19,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from .util import (
+    get_yaml_loader,
     load_conf,
     dump_conf,
     make_obj_from_conf,
@@ -63,7 +64,7 @@ class Trainer:
             inline_conf_overrides = {
                 list(kv.keys())[0]: list(kv.values())[0]
                 for kv in [
-                    yaml.load(ico.replace("=", ": "), yaml.FullLoader)
+                    yaml.load(ico.replace("=", ": "), get_yaml_loader())
                     for ico in inline_conf_overrides
                 ]
             }
