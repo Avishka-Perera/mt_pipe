@@ -50,6 +50,12 @@ def parse_args():
         help="import path to the Trainer object",
     )
     parser.add_argument(
+        "--multi-modal",
+        action="store_true",
+        default=False,
+        help="Whether the configuration is for a multi-modal setup",
+    )
+    parser.add_argument(
         "-a",
         "--analysis",
         type=int,
@@ -101,6 +107,7 @@ def main():
         resume=args.resume,
         force_resume=args.force_resume,
         out_dir=args.out_dir,
+        multi_modal=args.multi_modal,
         default_conf_path=args.default_config,
         conf_override_path=args.config,
         inline_conf_overrides=args.inline_conf_overrides,

@@ -4,7 +4,7 @@ from typing import Sequence, Callable, Dict
 
 import torch
 from torch.utils.data import default_collate
-from torch.utils.data import ConcatDataset, Dataset
+from torch.utils.data import ConcatDataset, Dataset, DataLoader
 from omegaconf import OmegaConf, ListConfig
 
 from .utils import make_obj_from_conf
@@ -62,3 +62,24 @@ class ConcatSet(Dataset):
 
     def __getitem__(self, index):
         return self.dataset.__getitem__(index)
+
+
+class ParallelDataLoader:
+    def __init__(self, dataloaders: Dict[str, DataLoader]) -> None:
+        self.dataloaders = dataloaders
+        self.iterators = {dp: iter(dl) for dp, dl in self.dataloaders.items()}
+
+    def __len__(self) -> int:
+        return min([len(dl) for dl in self.dataloaders.values()])
+
+    def __iter__(self):
+        self.iterators = {dp: iter(dl) for dp, dl in self.dataloaders.items()}
+        return self
+
+    def __next__(self):
+        try:
+            batch = {dp: next(dl_iter) for dp, dl_iter in self.iterators.items()}
+            return batch
+        except StopIteration:
+            self.iterators = [iter(loader) for loader in self.dataloaders]
+            raise StopIteration

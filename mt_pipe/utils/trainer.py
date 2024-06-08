@@ -26,7 +26,8 @@ from .utils import (
     get_input_mapper,
     get_nested_attr,
 )
-from .data import to_device_deep, get_collate_func
+from .muxes import LossMux, VisualizerMux
+from .data import to_device_deep, get_collate_func, ParallelDataLoader
 from ..evaluators import Evaluator
 from ..visualizers import Visualizer
 from .logger import Logger
@@ -40,6 +41,7 @@ class Trainer:
         resume: bool,
         force_resume: bool,
         out_dir: str,
+        multi_modal: bool,
         default_conf_path: str,
         conf_override_path: str,
         inline_conf_overrides: List[str],
@@ -61,6 +63,10 @@ class Trainer:
 
         logger.info(f"-- CONFIG --\n{dump_conf(conf)}\n")
 
+        train_datapaths, val_datapaths, test_datapaths = self.get_multimodal_datapaths(
+            conf, multi_modal
+        )
+
         # initialize output
         (
             results_dir,
@@ -74,20 +80,41 @@ class Trainer:
         ) = self.init_output(conf, args, out_dir, resume, logger)
 
         # prepare objects
-        train_dl, val_dl, test_dl = self.load_dataloaders(conf, do_val, do_test)
+        train_dl, val_dl, test_dl = self.load_dataloaders(
+            conf,
+            do_val,
+            do_test,
+            multi_modal,
+            train_datapaths,
+            val_datapaths,
+            test_datapaths,
+        )
         model, model_input_mapper, optimizing_model = self.load_model(conf, device)
         if do_grad_analysis:
             logger.init_gradient_analyzer(optimizing_model)
-        loss_fn, loss_input_mapper = self.load_loss_fns(conf)
-        optim_loss_mapper, optimizer = self.load_optimizer(conf, optimizing_model)
+        (
+            train_loss_fn,
+            train_loss_input_mapper,
+            val_loss_fn,
+            val_loss_input_mapper,
+            train_loss_output_mapper,
+            val_loss_output_mapper,
+        ) = self.load_loss_fns(
+            conf, multi_modal, train_datapaths, val_datapaths, do_val
+        )
+        optimizer = self.load_optimizer(conf, optimizing_model)
         lr_scheduler = self.load_lr_scheduler(conf, optimizer)
         (
             train_visualizer,
             val_visualizer,
             train_visualizer_mapper,
             val_visualizer_mapper,
-        ) = self.load_visualizers(conf, logger)
-        evaluator, eval_input_mapper = self.load_evaluator(conf, do_test, results_dir)
+        ) = self.load_visualizers(
+            conf, logger, multi_modal, train_datapaths, val_datapaths, do_val
+        )
+        evaluator, eval_input_mapper = self.load_evaluator(
+            conf, do_test, results_dir, multi_modal
+        )
 
         # resume training
         start_epoch, loss_evol = self.resume(
@@ -109,9 +136,12 @@ class Trainer:
         self.device = device
         self.model = model
         self.model_input_mapper = model_input_mapper
-        self.loss_fn = loss_fn
-        self.loss_input_mapper = loss_input_mapper
-        self.optim_loss_mapper = optim_loss_mapper
+        self.train_loss_fn = train_loss_fn
+        self.train_loss_input_mapper = train_loss_input_mapper
+        self.val_loss_fn = val_loss_fn
+        self.val_loss_input_mapper = val_loss_input_mapper
+        self.train_loss_output_mapper = train_loss_output_mapper
+        self.val_loss_output_mapper = val_loss_output_mapper
         self.optimizing_model = optimizing_model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -170,6 +200,15 @@ class Trainer:
 
         return conf
 
+    def get_multimodal_datapaths(self, conf, multi_modal):
+        if multi_modal:
+            train_datapaths = tuple(conf.train.keys())
+            val_datapaths = tuple(conf.val.keys()) if "val" in conf else None
+            test_datapaths = tuple(conf.test.keys()) if "test" in conf else None
+        else:
+            train_datapaths = val_datapaths = test_datapaths = None
+        return train_datapaths, val_datapaths, test_datapaths
+
     def init_output(self, conf, args, out_dir, resume, logger):
         tblog_dir = ospj(out_dir, "tblogs")
         ckpts_dir = ospj(out_dir, "ckpt")
@@ -224,7 +263,16 @@ class Trainer:
             resumption_id,
         )
 
-    def load_dataloaders(self, conf, do_val, do_test):
+    def load_dataloaders(
+        self,
+        conf,
+        do_val,
+        do_test,
+        multi_modal=False,
+        train_datapaths=None,
+        val_datapaths=None,
+        test_datapaths=None,
+    ):
         augmentors = (
             {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
             if "augmentors" in conf
@@ -233,11 +281,14 @@ class Trainer:
 
         def make_dl(loop_conf) -> DataLoader:
             ds = make_obj_from_conf(conf.datasets[loop_conf.dataset])
-            aug_conf = conf.augmentors[loop_conf.augmentor]
             collate_fn = (
                 get_collate_func(
                     augmentors[loop_conf.augmentor],
-                    aug_conf.post_collate if "post_collate" in aug_conf else False,
+                    (
+                        conf.augmentors[loop_conf.augmentor].post_collate
+                        if "post_collate" in conf.augmentors[loop_conf.augmentor]
+                        else False
+                    ),
                 )
                 if "augmentor" in loop_conf
                 else None
@@ -245,9 +296,26 @@ class Trainer:
             dl = DataLoader(ds, collate_fn=collate_fn, **loop_conf.loader_params)
             return dl
 
-        train_dl = make_dl(conf.train)
-        val_dl = make_dl(conf.val) if do_val else None
-        test_dl = make_dl(conf.test) if do_test else None
+        if multi_modal:
+            train_dl = ParallelDataLoader(
+                {dp: make_dl(conf.train[dp]) for dp in train_datapaths}
+            )
+            val_dl = (
+                ParallelDataLoader({dp: make_dl(conf.val[dp]) for dp in val_datapaths})
+                if do_val
+                else None
+            )
+            test_dl = (
+                ParallelDataLoader(
+                    {dp: make_dl(conf.test[dp]) for dp in test_datapaths}
+                )
+                if do_test
+                else None
+            )
+        else:
+            train_dl = make_dl(conf.train)
+            val_dl = make_dl(conf.val) if do_val else None
+            test_dl = make_dl(conf.test) if do_test else None
         return train_dl, val_dl, test_dl
 
     def load_model(self, conf, device):
@@ -264,25 +332,97 @@ class Trainer:
         )
         return model, model_input_mapper, optimizing_model
 
-    def load_loss_fns(self, conf):
-        loss_fn: Module = make_obj_from_conf(conf.loss_fn)
-        loss_input_mapper: Callable = (
-            get_input_mapper(conf.loss_fn.input_map)
-            if "input_map" in conf.loss_fn
-            else get_input_mapper(None)
+    def load_loss_fns(self, conf, multi_modal, train_datapaths, val_datapaths, do_val):
+        val_loss_fn = None
+        val_loss_input_mapper = None
+        val_loss_output_mapper = None
+        if "loss_fns" in conf:
+            loss_fns = {k: make_obj_from_conf(v) for k, v in conf.loss_fns.items()}
+            loss_fn_input_mappers = {
+                k: get_input_mapper(v.input_map if "input_map" in v else None)
+                for k, v in conf.loss_fns.items()
+            }
+            loss_fn_output_mappers = {
+                k: get_input_mapper(v.output_map if "output_map" in v else None)
+                for k, v in conf.loss_fns.items()
+            }
+            if multi_modal:
+                train_loss_dict = {
+                    k: loss_fns[conf.train[k].loss_fn] for k in train_datapaths
+                }
+                train_loss_input_mapper_dict = {
+                    k: loss_fn_input_mappers[conf.train[k].loss_fn]
+                    for k in train_datapaths
+                }
+                train_loss_output_mapper_dict = {
+                    k: loss_fn_output_mappers[conf.train[k].loss_fn]
+                    for k in train_datapaths
+                }
+                train_loss_fn = LossMux(
+                    train_loss_dict,
+                    train_loss_input_mapper_dict,
+                    train_loss_output_mapper_dict,
+                )
+                train_loss_input_mapper = get_input_mapper()
+                train_loss_output_mapper = get_input_mapper([["loss_out", "tot"]])
+
+                if do_val:
+                    val_loss_dict = {
+                        k: loss_fns[conf.val[k].loss_fn] for k in val_datapaths
+                    }
+                    val_loss_input_mapper_dict = {
+                        k: loss_fn_input_mappers[conf.val[k].loss_fn]
+                        for k in val_datapaths
+                    }
+                    val_loss_output_mapper_dict = {
+                        k: loss_fn_output_mappers[conf.val[k].loss_fn]
+                        for k in val_datapaths
+                    }
+                    val_loss_fn = LossMux(
+                        val_loss_dict,
+                        val_loss_input_mapper_dict,
+                        val_loss_output_mapper_dict,
+                    )
+                    val_loss_input_mapper = train_loss_input_mapper
+                    val_loss_input_mapper = train_loss_output_mapper
+            else:
+                train_loss_fn = loss_fns[conf.train.loss_fn]
+                train_loss_input_mapper = loss_fn_input_mappers[conf.train.loss_fn]
+                train_loss_output_mapper = loss_fn_output_mappers[conf.train.loss_fn]
+                if do_val:
+                    val_loss_fn = loss_fns[conf.val.loss_fn]
+                    val_loss_input_mapper = loss_fn_input_mappers[conf.val.loss_fn]
+                    val_loss_output_mapper = loss_fn_output_mappers[conf.val.loss_fn]
+        else:
+            train_loss_fn: Module = make_obj_from_conf(conf.loss_fn)
+            train_loss_input_mapper: Callable = (
+                get_input_mapper(conf.loss_fn.input_map)
+                if "input_map" in conf.loss_fn
+                else get_input_mapper(None)
+            )
+            train_loss_output_mapper: Callable = (
+                get_input_mapper(conf.loss_fn.output_map)
+                if "output_map" in conf.loss_fn
+                else get_input_mapper(None)
+            )
+            if do_val:
+                val_loss_fn = train_loss_fn
+                val_loss_input_mapper = train_loss_input_mapper
+                val_loss_output_mapper = train_loss_output_mapper
+        return (
+            train_loss_fn,
+            train_loss_input_mapper,
+            val_loss_fn,
+            val_loss_input_mapper,
+            train_loss_output_mapper,
+            val_loss_output_mapper,
         )
-        return loss_fn, loss_input_mapper
 
     def load_optimizer(self, conf, optimizing_model):
-        optim_loss_mapper: Callable = (
-            get_input_mapper(conf.optimizer.loss_map)
-            if "loss_map" in conf.optimizer
-            else get_input_mapper(None)
-        )
         optimizer: Optimizer = make_obj_from_conf(
             conf.optimizer, params=optimizing_model.parameters()
         )
-        return optim_loss_mapper, optimizer
+        return optimizer
 
     def load_lr_scheduler(self, conf, optimizer):
         if "lr_scheduler" in conf:
@@ -293,7 +433,11 @@ class Trainer:
             lr_scheduler = None
         return lr_scheduler
 
-    def load_visualizers(self, conf, logger):
+    def load_visualizers(
+        self, conf, logger, multi_modal, train_datapaths, val_datapaths, do_val
+    ):
+        val_visualizer = None
+        val_visualizer_mapper = None
         visualizers: Dict[str, Visualizer] = (
             {
                 k: make_obj_from_conf(v, _writer=logger.writer)
@@ -314,30 +458,58 @@ class Trainer:
             if "visualizers" in conf
             else {}
         )
-        if len(visualizers) != 0:
+        if multi_modal:
+            train_visualizers_dict = {
+                k: (visualizers[conf.train[k].visualizer])
+                for k in train_datapaths
+                if "visualizer" in conf.train[k]
+            }
+            train_visualizers_input_mapper_dict = {
+                k: (visualizer_mappers[conf.train[k].visualizer])
+                for k in train_datapaths
+                if "visualizer" in conf.train[k]
+            }
+            train_visualizer = VisualizerMux(
+                train_visualizers_dict, train_visualizers_input_mapper_dict
+            )
+            train_visualizer_mapper = get_input_mapper()
+            if do_val:
+                val_visualizers_dict = {
+                    k: (visualizers[conf.val[k].visualizer])
+                    for k in val_datapaths
+                    if "visualizer" in conf.val[k]
+                }
+                val_visualizers_input_mapper_dict = {
+                    k: (visualizer_mappers[conf.val[k].visualizer])
+                    for k in val_datapaths
+                    if "visualizer" in conf.val[k]
+                }
+                val_visualizer = VisualizerMux(
+                    val_visualizers_dict, val_visualizers_input_mapper_dict
+                )
+                val_visualizer_mapper = train_visualizer_mapper
+        else:
             train_visualizer = (
                 visualizers[conf.train.visualizer]
                 if "visualizer" in conf.train
                 else None
-            )
-            val_visualizer = (
-                visualizers[conf.val.visualizer] if "visualizer" in conf.val else None
             )
             train_visualizer_mapper = (
                 visualizer_mappers[conf.train.visualizer]
                 if "visualizer" in conf.train
                 else None
             )
-            val_visualizer_mapper = (
-                visualizer_mappers[conf.val.visualizer]
-                if "visualizer" in conf.val
-                else None
-            )
-        else:
-            train_visualizer = None
-            val_visualizer = None
-            train_visualizer_mapper = None
-            val_visualizer_mapper = None
+            if do_val:
+                val_visualizer = (
+                    visualizers[conf.val.visualizer]
+                    if "visualizer" in conf.val
+                    else None
+                )
+                val_visualizer_mapper = (
+                    visualizer_mappers[conf.val.visualizer]
+                    if "visualizer" in conf.val
+                    else None
+                )
 
         return (
             train_visualizer,
@@ -346,8 +518,13 @@ class Trainer:
             val_visualizer_mapper,
         )
 
-    def load_evaluator(self, conf, do_test, results_dir):
+    def load_evaluator(self, conf, do_test, results_dir, multi_modal):
+
         if do_test:
+            if multi_modal:
+                raise NotImplementedError(
+                    "Evaluation for multimodal setups are not implemented yet"
+                )
             norm_ds_params = conf.datasets[conf.test.dataset].params
             norm_mean = (
                 norm_ds_params.img_norm_mean
@@ -431,15 +608,15 @@ class Trainer:
                 if type(model_in) == dict
                 else self.model(*model_in)
             )
-            loss_in = self.loss_input_mapper(batch=batch, model_out=model_out)
+            loss_in = self.train_loss_input_mapper(batch=batch, model_out=model_out)
             loss_out = (
-                self.loss_fn(**loss_in)
+                self.train_loss_fn(**loss_in)
                 if type(loss_in) == dict
-                else self.loss_fn(*loss_in)
+                else self.train_loss_fn(*loss_in)
             )
 
             # backward pass and optimization
-            loss = self.optim_loss_mapper(loss_out=loss_out)
+            loss = self.train_loss_output_mapper(loss_out=loss_out)
             loss = tuple(loss.values())[0] if type(loss) == dict else loss[0]
             self.optimizer.zero_grad()
             loss.backward()
@@ -461,8 +638,9 @@ class Trainer:
                     epoch * len(self.train_dl) + batch_id,
                 )
             if (
-                self.visualize_every != -1 and batch_id % self.visualize_every == 0
-            ) or (self.visualize_every == -1 and batch_id == len(self.train_dl) - 1):
+                (self.visualize_every != -1 and batch_id % self.visualize_every == 0)
+                or (self.visualize_every == -1 and batch_id == len(self.train_dl) - 1)
+            ) and self.train_visualizer_mapper is not None:
                 visualizer_in = self.train_visualizer_mapper(
                     batch=batch, model_out=model_out, epoch=epoch, loop="train"
                 )
@@ -496,20 +674,21 @@ class Trainer:
                 if type(model_in) == dict
                 else self.model(*model_in)
             )
-            loss_in = self.loss_input_mapper(batch=batch, model_out=model_out)
+            loss_in = self.val_loss_input_mapper(batch=batch, model_out=model_out)
             loss_out = (
-                self.loss_fn(**loss_in)
+                self.val_loss_fn(**loss_in)
                 if type(loss_in) == dict
-                else self.loss_fn(*loss_in)
+                else self.val_loss_fn(*loss_in)
             )
 
             # logging
-            loss = self.optim_loss_mapper(loss_out=loss_out)
+            loss = self.val_loss_output_mapper(loss_out=loss_out)
             loss = tuple(loss.values())[0] if type(loss) == dict else loss[0]
             losses.append(loss.item())
             if (
-                self.visualize_every != -1 and batch_id % self.visualize_every == 0
-            ) or (self.visualize_every == -1 and batch_id == len(self.val_dl) - 1):
+                (self.visualize_every != -1 and batch_id % self.visualize_every == 0)
+                or (self.visualize_every == -1 and batch_id == len(self.val_dl) - 1)
+            ) and self.val_visualizer_mapper is not None:
                 visualizer_in = self.val_visualizer_mapper(
                     batch=batch, model_out=model_out, epoch=epoch, loop="val"
                 )

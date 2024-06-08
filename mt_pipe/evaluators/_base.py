@@ -18,7 +18,7 @@ class Evaluator:
         pass
 
     @abstractmethod
-    def __call__(self, _result_dir: str, *args, **kwargs) -> None:
+    def __call__(self, *args, **kwargs) -> None:
         pass
 
     @abstractmethod
