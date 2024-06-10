@@ -3,8 +3,11 @@
 import importlib
 from typing import Sequence, Dict, Callable, List, Iterable
 import re
+from logging import getLogger
+
 import yaml
 from omegaconf import OmegaConf, ListConfig, DictConfig
+import torch
 
 
 def get_yaml_loader():
@@ -187,3 +190,15 @@ def get_input_mapper(conf: ListConfig | DictConfig | Dict | List = None) -> Call
         return lambda **kwargs: kwargs
 
     raise ValueError("Invalid input mapper configuration definition")
+
+
+def load_weights(model, path, key=None, prefix=""):
+    ckpt = torch.load(path)
+    sd = ckpt[key] if key is not None else ckpt
+    new_sd = {}
+    for k, v in sd.items():
+        if k.startswith(prefix):
+            new_sd[k[len(prefix) :]] = v
+    status = model.load_state_dict(new_sd)
+    logger = getLogger()
+    logger.info(f"{model.__class__} {status}")

@@ -1,15 +1,17 @@
 from torch import nn
-from typing import Sequence, Dict
-from ..utils import load_class
+from typing import Dict
+from ..utils import load_class, load_weights
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 
 
 class ModelMux(nn.Module):
+
     def __init__(
         self,
         chldrn: Dict | DictConfig,
         encoder: Dict | DictConfig,
+        weights: Dict[str, str] = None,
     ) -> None:
         super().__init__()
         encoder = OmegaConf.create(encoder)
@@ -27,6 +29,8 @@ class ModelMux(nn.Module):
 
         self.chldrn_confs = chldrn
         self.datapath_names = datapath_names
+        if weights is not None:
+            load_weights(self, **weights)
 
     def forward(self, batch):
         out = {}
