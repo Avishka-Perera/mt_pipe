@@ -179,11 +179,12 @@ class Trainer:
             conf = OmegaConf.merge(default_conf, conf_override)
         if inline_conf_overrides is not None:
             inline_conf_overrides = {
-                list(kv.keys())[0]: list(kv.values())[0]
+                k: v
                 for kv in [
                     yaml.load(ico.replace("=", ": "), get_yaml_loader())
                     for ico in inline_conf_overrides
                 ]
+                for k, v in kv.items()
             }
 
             def set_deep_key(obj, k, v):

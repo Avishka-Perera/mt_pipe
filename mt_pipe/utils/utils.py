@@ -201,4 +201,4 @@ def load_weights(model, path, key=None, prefix=""):
             new_sd[k[len(prefix) :]] = v
     status = model.load_state_dict(new_sd)
     logger = getLogger()
-    logger.info(f"{model.__class__} {status}")
+    logger.info(f"Weights loading ({model.__class__}): {status}")
