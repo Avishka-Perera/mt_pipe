@@ -7,6 +7,10 @@ from torch.optim import Optimizer
 
 
 class LinearCosineConstantLR(CosineAnnealingLR):
+    """LRScheduler with warup option that follows a cosine schedule,
+    but remains constant when it reaches eta_min
+    """
+
     def __init__(
         self,
         optimizer: Optimizer,
@@ -45,18 +49,7 @@ class LinearCosineConstantLR(CosineAnnealingLR):
 
 
 class CosineConstantLR(LinearCosineConstantLR):
-    """LRScheduler that follows a cosine schedule, but remains constant when it reaches eta_min
-
-    CosineAnnealingLRWithConstant(
-        optimizer: Optimizer, T_max: int, eta_min: int = 0, last_epoch: int = -1
-    )
-
-    # Methods
-
-    ## step(self, epoch: float | int = None) -> None
-
-    Adjusts the learning rate in the optimizer parameter groups
-    """
+    """LRScheduler that follows a cosine schedule, but remains constant when it reaches eta_min"""
 
     def __init__(
         self, optimizer: Optimizer, T_max: int, eta_min: int = 0, last_epoch: int = -1

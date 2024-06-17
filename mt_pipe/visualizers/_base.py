@@ -1,13 +1,17 @@
-import numpy as np
+"""Visualizer base class"""
+
 from abc import abstractmethod
-from typing import Dict, Sequence
-import random
+from typing import Dict
+
+import numpy as np
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
 
 class Visualizer:
+    """Visualizer base class"""
+
     def __init__(
         self,
         name: str = None,

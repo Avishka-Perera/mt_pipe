@@ -3,20 +3,22 @@
 import glob
 import os
 from os.path import join as ospj
-from typing import Dict, Callable, List
+from typing import Dict, Callable, List, Tuple, Any, TypedDict
 from argparse import Namespace
 import datetime
+from abc import abstractmethod
+from io import TextIOWrapper
+
 import tqdm
+import pandas as pd
+import matplotlib.pyplot as plt
 import yaml
 from omegaconf import OmegaConf, DictConfig
-
 import torch
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 from torch.nn import Module
-import pandas as pd
-import matplotlib.pyplot as plt
 
 from .utils import (
     get_yaml_loader,
@@ -32,8 +34,19 @@ from ..evaluators import Evaluator
 from ..visualizers import Visualizer
 from .logger import Logger
 
+T_mapper_config = Dict[str, List[str | int]] | List[List[str | int]]
+
+
+class T_dp_config(TypedDict):
+    loss: str  # TODO: remove any
+
+
+T_loop_config = T_dp_config | Dict[str, T_dp_config]
+
 
 class Trainer:
+    """Trainer object that will handle the interconnection and communication
+    among modules participating in the training job"""
 
     def __init__(
         self,
@@ -51,123 +64,84 @@ class Trainer:
         visualize_every: int,
     ) -> None:
 
-        conf = self.load_config(
-            default_conf_path, conf_override_path, inline_conf_overrides
+        self.load_config(default_conf_path, conf_override_path, inline_conf_overrides)
+
+        self.do_val = "val" in self.conf
+        self.do_test = "test" in self.conf
+        self.do_grad_analysis = analysis_level >= 2
+        self.do_loss_analysis = analysis_level >= 1
+        self.device = device
+        self.visualize_every = visualize_every
+        self.epochs = self.conf.epochs
+        self.tollerance = self.conf.tollerance if "tollerance" in self.conf else None
+        self.logger = Logger(
+            verbose_level=verbose_level, do_loss_analysis=self.do_loss_analysis
         )
 
-        do_val = "val" in conf
-        do_test = "test" in conf
-        do_grad_analysis = analysis_level >= 2
-        do_loss_analysis = analysis_level >= 1
-        logger = Logger(verbose_level=verbose_level, do_loss_analysis=do_loss_analysis)
+        self.logger.info(f"-- CONFIG --\n{dump_conf(self.conf)}\n")
 
-        logger.info(f"-- CONFIG --\n{dump_conf(conf)}\n")
-
-        train_datapaths, val_datapaths, test_datapaths = self.get_multimodal_datapaths(
-            conf, multi_modal
-        )
-
-        # initialize output
-        (
-            results_dir,
-            ckpts_dir,
-            best_ckpt_path,
-            final_ckpt_path,
-            report,
-            loss_evol_path_csv,
-            loss_evol_path_img,
-            resumption_id,
-        ) = self.init_output(conf, args, out_dir, resume, logger)
-
-        # prepare objects
-        train_dl, val_dl, test_dl = self.load_dataloaders(
-            conf,
-            do_val,
-            do_test,
+        self.find_multimodal_datapaths(self.conf, multi_modal)
+        self.init_output(self.conf, args, out_dir, resume, self.logger)
+        self.load_dataloaders(
+            self.conf,
+            self.do_val,
+            self.do_test,
             multi_modal,
-            train_datapaths,
-            val_datapaths,
-            test_datapaths,
+            self.train_datapaths,
+            self.val_datapaths,
+            self.test_datapaths,
         )
-        model, model_input_mapper, optimizing_model = self.load_model(conf, device)
-        if do_grad_analysis:
-            logger.init_gradient_analyzer(optimizing_model)
-        (
-            train_loss_fn,
-            train_loss_input_mapper,
-            val_loss_fn,
-            val_loss_input_mapper,
-            train_loss_output_mapper,
-            val_loss_output_mapper,
-        ) = self.load_loss_fns(
-            conf, multi_modal, train_datapaths, val_datapaths, do_val
+        self.load_model(self.conf, device)
+        if self.do_grad_analysis:
+            self.logger.init_gradient_analyzer(self.optimizing_model)
+        self.load_loss_fns(
+            self.conf,
+            multi_modal,
+            self.train_datapaths,
+            self.val_datapaths,
+            self.do_val,
         )
-        optimizer = self.load_optimizer(conf, optimizing_model)
-        lr_scheduler = self.load_lr_scheduler(conf, optimizer)
-        (
-            train_visualizer,
-            val_visualizer,
-            train_visualizer_mapper,
-            val_visualizer_mapper,
-        ) = self.load_visualizers(
-            conf, logger, multi_modal, train_datapaths, val_datapaths, do_val
+        self.load_optimizer(self.conf, self.optimizing_model)
+        self.load_lr_scheduler(self.conf, self.optimizer)
+        self.load_visualizers(
+            self.conf,
+            self.logger,
+            multi_modal,
+            self.train_datapaths,
+            self.val_datapaths,
+            self.do_val,
         )
-        evaluator, eval_input_mapper = self.load_evaluator(
-            conf, do_test, results_dir, multi_modal
-        )
-
-        # resume training
-        start_epoch, loss_evol = self.resume(
-            conf,
+        self.load_evaluator(self.conf, self.do_test, self.results_dir, multi_modal)
+        self.resume(
+            self.conf,
             resume,
             force_resume,
             out_dir,
-            resumption_id,
-            final_ckpt_path,
-            loss_evol_path_csv,
-            logger,
+            self.resumption_id,
+            self.final_ckpt_path,
+            self.loss_evol_path_csv,
+            self.logger,
         )
 
-        self.do_val = do_val
-        self.do_test = do_test
-        self.do_grad_analysis = do_grad_analysis
-        self.do_loss_analysis = do_loss_analysis
-        self.logger = logger
-        self.device = device
-        self.model = model
-        self.model_input_mapper = model_input_mapper
-        self.train_loss_fn = train_loss_fn
-        self.train_loss_input_mapper = train_loss_input_mapper
-        self.val_loss_fn = val_loss_fn
-        self.val_loss_input_mapper = val_loss_input_mapper
-        self.train_loss_output_mapper = train_loss_output_mapper
-        self.val_loss_output_mapper = val_loss_output_mapper
-        self.optimizing_model = optimizing_model
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.evaluator = evaluator
-        self.eval_input_mapper = eval_input_mapper
-        self.train_visualizer = train_visualizer
-        self.val_visualizer = val_visualizer
-        self.train_visualizer_mapper = train_visualizer_mapper
-        self.val_visualizer_mapper = val_visualizer_mapper
-        self.visualize_every = visualize_every
-        self.train_dl = train_dl
-        self.val_dl = val_dl
-        self.test_dl = test_dl
-        self.epochs = conf.epochs
-        self.tollerance = conf.tollerance if "tollerance" in conf else None
-        self.ckpts_dir = ckpts_dir
-        self.best_ckpt_path = best_ckpt_path
-        self.final_ckpt_path = final_ckpt_path
-        self.results_dir = results_dir
-        self.report = report
-        self.loss_evol_path_csv = loss_evol_path_csv
-        self.loss_evol_path_img = loss_evol_path_img
-        self.start_epoch = start_epoch
-        self.loss_evol = loss_evol
-
-    def load_config(self, default_conf_path, conf_override_path, inline_conf_overrides):
+    def load_config(
+        self,
+        default_conf_path: str | None,
+        conf_override_path: str | None,
+        inline_conf_overrides: List[str] | None,
+    ) -> None:
+        """Loads configuration using the configuration paths and inline overrides
+        Arguments:
+            1. default_conf_path: str | None: Path for the default configuration file (YAML/JSON)
+            2. conf_override_path: str | None: Path for the overriding configuration file
+                (YAML/JSON). Loaded configuration will be merged with changes proposed by this
+            3. inline_conf_overrides: List[str] | None: Inline overrides for the configuration.
+                A single entry will have a key value pair delimited by "="
+                e.g.: ["model.params.drop_rate=0.1"]
+        Sets:
+            1. self.conf: DictConfig: Loaded Job Configuration
+        Returns:
+            None
+        """
         if default_conf_path is None:
             default_conf = DictConfig({})
         else:
@@ -199,18 +173,62 @@ class Trainer:
             for k, v in inline_conf_overrides.items():
                 set_deep_key(conf, k, v)
 
-        return conf
+        self.conf: DictConfig = conf
 
-    def get_multimodal_datapaths(self, conf, multi_modal):
+    def find_multimodal_datapaths(self, conf: DictConfig, multi_modal: bool) -> None:
+        """Finds the datapaths related to multimodal setup
+        Arguments:
+            1. conf: DictConfig: Job Configuration
+            2. multi_modal: bool: Whether the setup is multi-modal or not
+        Related configuration:
+            1. conf.train: T_loop_config: Training loop configuration
+            2. conf.val: T_loop_config (Optional): Validating loop configuration
+            3. conf.train: T_loop_config (Optional): Testing loop configuration
+        Sets:
+            1. self.train_datapaths: Tuple[str] | None: Datapaths in the training loop.
+                None if not multi-modal.
+            2. self.val_datapaths: Tuple[str] | None: Datapaths in the validation loop.
+                None if not multi-modal or no validation.
+            3. self.test_datapaths: Tuple[str] | None: Datapaths in the testing loop.
+                None if not multi-modal or not testing.
+        Returns:
+            None
+        """
         if multi_modal:
             train_datapaths = tuple(conf.train.keys())
             val_datapaths = tuple(conf.val.keys()) if "val" in conf else None
             test_datapaths = tuple(conf.test.keys()) if "test" in conf else None
         else:
             train_datapaths = val_datapaths = test_datapaths = None
-        return train_datapaths, val_datapaths, test_datapaths
+        self.train_datapaths: Tuple[str] | None = train_datapaths
+        self.val_datapaths: Tuple[str] | None = val_datapaths
+        self.test_datapaths: Tuple[str] | None = test_datapaths
 
-    def init_output(self, conf, args, out_dir, resume, logger):
+    def init_output(
+        self, conf: Dict, args: Namespace, out_dir: str, resume: bool, logger: Logger
+    ) -> None:
+        """Initializes the outputs
+        Arguments:
+            1. conf: Dict: Job Configuration
+            2. args: Namespace: Parsed commandline arguments
+            3. out_dir: str: Output directory
+            4. resume: bool: Whether to resume training from the last checkpoint in the out_dir
+            5. logger: Logger: Logger
+        Related configurations:
+            1. conf.checkpoints: List[int]: Extra checkpoints to be saved
+        Sets:
+            1. self.results_dir: str: Directory where the results will be saved
+            2. self.ckpts_dir: str: Directory where the checkpoints will be saved
+            3. self.best_ckpt_path: str: Path to the best checkpoint path (best.ckpt)
+            4. self.final_ckpt_path: str: Path to the final checkpoint path (final.ckpt)
+            5. self.report: TextIOWrapper: File handle for the final report
+            6. self.loss_evol_path_csv: str: Path to the loss evolution log
+            7. self.loss_evol_path_img: str: Path to the loss evolution visualization
+            8. self.resumption_id: int | None: Resumption id
+            9. self.checkpoints: Dict[int, str]: Additional checkpoints mapping from epoch to path
+        Returns:
+            None
+        """
         tblog_dir = ospj(out_dir, "tblogs")
         ckpts_dir = ospj(out_dir, "ckpt")
         best_ckpt_path = ospj(ckpts_dir, "best.ckpt")
@@ -230,50 +248,68 @@ class Trainer:
             info_mode = "a"
         else:
             info = []
-            args_save_path = ospj(out_dir, f"args.yaml")
-            conf_save_path = ospj(out_dir, f"conf.yaml")
+            args_save_path = ospj(out_dir, "args.yaml")
+            conf_save_path = ospj(out_dir, "conf.yaml")
             info_mode = "w"
             resumption_id = None
-        loss_evol_path_csv = ospj(out_dir, f"loss.csv")
-        loss_evol_path_img = ospj(out_dir, f"loss.jpg")
+        loss_evol_path_csv = ospj(out_dir, "loss.csv")
+        loss_evol_path_img = ospj(out_dir, "loss.jpg")
         report_path = ospj(results_dir, "report.txt")
-        report = open(report_path, "a")
+        # pylint: disable-next=R1732
+        report = open(report_path, "a", encoding="utf-8")
         info.append(f"Start: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         info = "\n".join(info)
         info_save_path = ospj(out_dir, "info.txt")
-        with open(info_save_path, info_mode) as handler:
+        with open(info_save_path, info_mode, encoding="utf-8") as handler:
             handler.write(info)
         dump_conf(args, args_save_path)
         dump_conf(conf, conf_save_path)
 
         # additional checkpoints
-        self.checkpoints = (
-            {e: ospj(ckpts_dir, f"{e}.ckpt") for e in conf.checkpoints}
+        checkpoints = (
+            {int(e): ospj(ckpts_dir, f"{e}.ckpt") for e in conf.checkpoints}
             if "checkpoints" in conf
             else {}
         )
 
-        return (
-            results_dir,
-            ckpts_dir,
-            best_ckpt_path,
-            final_ckpt_path,
-            report,
-            loss_evol_path_csv,
-            loss_evol_path_img,
-            resumption_id,
-        )
+        self.results_dir: str = results_dir
+        self.ckpts_dir: str = ckpts_dir
+        self.best_ckpt_path: str = best_ckpt_path
+        self.final_ckpt_path: str = final_ckpt_path
+        self.report: TextIOWrapper = report
+        self.loss_evol_path_csv: str = loss_evol_path_csv
+        self.loss_evol_path_img: str = loss_evol_path_img
+        self.resumption_id: int | None = resumption_id
+        self.checkpoints: Dict[int, str] = checkpoints
 
     def load_dataloaders(
         self,
-        conf,
-        do_val,
-        do_test,
-        multi_modal=False,
-        train_datapaths=None,
-        val_datapaths=None,
-        test_datapaths=None,
+        conf: DictConfig,
+        do_val: bool,
+        do_test: bool,
+        multi_modal: bool = False,
+        train_datapaths: List[str] = None,
+        val_datapaths: List[str] = None,
+        test_datapaths: List[str] = None,
     ):
+        """Load the dataloaders for training, validating, and testing loops
+        Arguments:
+            1. conf: DictConfig: Job Configuration
+            2. do_val: bool: Whether to do the validation loop
+            3. do_test: bool: Whether to do the test loop
+            4. multi_modal: bool = False: Whether the setup is multi-modal or not
+            5. train_datapaths: List[str] = None: Datapaths in the training loop
+            6. val_datapaths: List[str] = None: Datapaths in the validation loop
+            7. test_datapaths: List[str] = None: Datapaths in the testing loop
+        Related configurations:
+            1.
+        Sets:
+            1. self.train_dl: DataLoader: Training dataloader
+            2. self.val_dl: DataLoader | None: Validating dataloader
+            3. self.test_dl: DataLoader | None: Testing dataloader
+        Returns:
+            None
+        """
         augmentors = (
             {k: make_obj_from_conf(v) for k, v in conf.augmentors.items()}
             if "augmentors" in conf
@@ -317,9 +353,25 @@ class Trainer:
             train_dl = make_dl(conf.train)
             val_dl = make_dl(conf.val) if do_val else None
             test_dl = make_dl(conf.test) if do_test else None
-        return train_dl, val_dl, test_dl
 
-    def load_model(self, conf, device):
+        self.train_dl: DataLoader = train_dl
+        self.val_dl: DataLoader | None = val_dl
+        self.test_dl: DataLoader | None = test_dl
+
+    def load_model(self, conf: DictConfig, device: int) -> None:
+        """Loads the model
+        Arguments:
+            1. conf: DictConfig: Job Configuration
+            2. device: int: Device id that must be used  for the Job
+        Related configuration:
+            1. conf.model: DictConfig: Object instantion configuration
+            2. conf.model.optimizing_model: str (Optional): Defines the part of the model to be optimized
+            3. conf.model.input_map: T_mapper_config (Optional): Input mapper configuration
+        Sets:
+            1. self.model: Module: Complete model
+            2. self.model_input_mapper: Callable: Model input mapper with standard inputs ["batch"]
+            3. self.optimizing_model: Module: Part of the model that must be optimized
+        """
         model: Module = make_obj_from_conf(conf.model).to(device)
         model_input_mapper: Callable = (
             get_input_mapper(conf.model.input_map)
@@ -331,9 +383,18 @@ class Trainer:
             if "optimizing_model" in conf.model
             else model
         )
-        return model, model_input_mapper, optimizing_model
+        self.model: Module = model
+        self.model_input_mapper: Callable = model_input_mapper
+        self.optimizing_model: Module = optimizing_model
 
-    def load_loss_fns(self, conf, multi_modal, train_datapaths, val_datapaths, do_val):
+    def load_loss_fns(
+        self,
+        conf: DictConfig,
+        multi_modal: bool,
+        train_datapaths: List[str],
+        val_datapaths: List[str],
+        do_val: bool,
+    ) -> None:
         val_loss_fn = None
         val_loss_input_mapper = None
         val_loss_output_mapper = None
@@ -410,33 +471,38 @@ class Trainer:
                 val_loss_fn = train_loss_fn
                 val_loss_input_mapper = train_loss_input_mapper
                 val_loss_output_mapper = train_loss_output_mapper
-        return (
-            train_loss_fn,
-            train_loss_input_mapper,
-            val_loss_fn,
-            val_loss_input_mapper,
-            train_loss_output_mapper,
-            val_loss_output_mapper,
-        )
 
-    def load_optimizer(self, conf, optimizing_model):
+        self.train_loss_fn = train_loss_fn
+        self.train_loss_input_mapper = train_loss_input_mapper
+        self.val_loss_fn = val_loss_fn
+        self.val_loss_input_mapper = val_loss_input_mapper
+        self.train_loss_output_mapper = train_loss_output_mapper
+        self.val_loss_output_mapper = val_loss_output_mapper
+
+    def load_optimizer(self, conf: DictConfig, optimizing_model: Module) -> None:
         optimizer: Optimizer = make_obj_from_conf(
             conf.optimizer, params=optimizing_model.parameters()
         )
-        return optimizer
+        self.optimizer = optimizer
 
-    def load_lr_scheduler(self, conf, optimizer):
+    def load_lr_scheduler(self, conf: DictConfig, optimizer: Optimizer) -> None:
         if "lr_scheduler" in conf:
             lr_scheduler: LRScheduler = make_obj_from_conf(
                 conf.lr_scheduler, optimizer=optimizer
             )
         else:
             lr_scheduler = None
-        return lr_scheduler
+        self.lr_scheduler = lr_scheduler
 
     def load_visualizers(
-        self, conf, logger, multi_modal, train_datapaths, val_datapaths, do_val
-    ):
+        self,
+        conf: DictConfig,
+        logger: Logger,
+        multi_modal: bool,
+        train_datapaths: Dict[str],
+        val_datapaths: Dict[str],
+        do_val: bool,
+    ) -> None:
         val_visualizer = None
         val_visualizer_mapper = None
         visualizers: Dict[str, Visualizer] = (
@@ -512,14 +578,14 @@ class Trainer:
                     else None
                 )
 
-        return (
-            train_visualizer,
-            val_visualizer,
-            train_visualizer_mapper,
-            val_visualizer_mapper,
-        )
+        self.train_visualizer = train_visualizer
+        self.val_visualizer = val_visualizer
+        self.train_visualizer_mapper = train_visualizer_mapper
+        self.val_visualizer_mapper = val_visualizer_mapper
 
-    def load_evaluator(self, conf, do_test, results_dir, multi_modal):
+    def load_evaluator(
+        self, conf: DictConfig, do_test: bool, results_dir: str, multi_modal: bool
+    ) -> None:
 
         if do_test:
             if multi_modal:
@@ -552,18 +618,19 @@ class Trainer:
             evaluator: Evaluator = None
             eval_input_mapper: Callable = None
 
-        return evaluator, eval_input_mapper
+        self.evaluator = evaluator
+        self.eval_input_mapper = eval_input_mapper
 
     def resume(
         self,
-        conf,
-        resume,
-        force_resume,
-        out_dir,
-        resumption_id,
-        final_ckpt_path,
-        loss_evol_path_csv,
-        logger,
+        conf: DictConfig,
+        resume: bool,
+        force_resume: bool,
+        out_dir: str,
+        resumption_id: int,
+        final_ckpt_path: str,
+        loss_evol_path_csv: str,
+        logger: Logger,
     ):
         if resume:
             prev_conf_path = (
@@ -583,12 +650,15 @@ class Trainer:
         else:
             start_epoch = 0
             loss_evol = []
-        return start_epoch, loss_evol
+
+        self.start_epoch = start_epoch
+        self.loss_evol = loss_evol
 
     def write_to_report(self, txt: str, end: str = "\n\n") -> None:
         self.report.write(txt + end)
 
-    def model_in_pre(self, model_in, epoch, batch_id):
+    @abstractmethod
+    def model_in_pre(self, model_in: Module, epoch: int, batch_id: int) -> None:
         return model_in
 
     def train_loop(self, epoch: int) -> float:
@@ -705,7 +775,7 @@ class Trainer:
         return val_loss
 
     @torch.no_grad()
-    def test_loop(self, epoch) -> str:
+    def test_loop(self, epoch: int) -> str:
         self.model.eval()
         self.load_ckpt(self.best_ckpt_path)
         for batch_id, batch in tqdm.tqdm(
@@ -736,7 +806,7 @@ class Trainer:
 
         return report
 
-    def save_ckpt(self, save_path: int, epoch: int, loss: Dict[str, float]):
+    def save_ckpt(self, save_path: str, epoch: int, loss: Dict[str, float]) -> None:
         ckpt = {
             "epoch": epoch,
             "loss": loss,
@@ -748,7 +818,7 @@ class Trainer:
         }
         torch.save(ckpt, save_path)
 
-    def load_ckpt(self, path) -> int:
+    def load_ckpt(self, path: str) -> int:
         ckpt = torch.load(path)
         epoch = ckpt["epoch"]
         optimizing_model_state = ckpt["optimizing_model"]
@@ -761,7 +831,7 @@ class Trainer:
         start_epoch = epoch + 1
         return start_epoch
 
-    def fit(self):
+    def fit(self) -> None:
         best_loss = float("inf")
         best_epoch = -1
         for epoch in range(self.start_epoch, self.epochs):

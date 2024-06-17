@@ -11,6 +11,7 @@ import torch
 
 
 def get_yaml_loader():
+    """Extends the default PyYAML loader to encode scentifically notated floats correctly"""
     yaml_loader = yaml.FullLoader
     yaml_loader.add_implicit_resolver(
         "tag:yaml.org,2002:float",
@@ -192,13 +193,30 @@ def get_input_mapper(conf: ListConfig | DictConfig | Dict | List = None) -> Call
     raise ValueError("Invalid input mapper configuration definition")
 
 
-def load_weights(model, path, key=None, prefix=""):
+def load_weights(
+    model: torch.nn.Module,
+    path: str,
+    key: str = None,
+    prefix: str = "",
+    strict: bool = True,
+):
+    """Loads weights to a model from a checkpoint path. Prints the status of the loading
+    Arguments:
+        1. model: torch.nn.Module: The model into which the weights must be loaded into
+        2. path: str: Path to the checkpoints file
+        3. key: str = None: The key (if any) to the state dictionary in the loaded checkpoint file.
+            If None is passed, the file is considered as the state dictionary
+        4. prefix: str = "": The prefix (if any) of the weights that should be loaded to the model
+        5. strict: bool = True: Whether to load the states strictly
+    Returns:
+        None
+    """
     ckpt = torch.load(path)
     sd = ckpt[key] if key is not None else ckpt
     new_sd = {}
     for k, v in sd.items():
         if k.startswith(prefix):
             new_sd[k[len(prefix) :]] = v
-    status = model.load_state_dict(new_sd)
+    status = model.load_state_dict(new_sd, strict=strict)
     logger = getLogger()
-    logger.info(f"Weights loading ({model.__class__}): {status}")
+    logger.info("Weights loading (%s): %s", model.__class__, status)

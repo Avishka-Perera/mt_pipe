@@ -1,0 +1,30 @@
+[MASTER]
+
+[VARIABLES]
+
+variable-rgx=[a-z_][a-z0-9_]{1,30}$
+
+[FUNCTIONS]
+
+function-rgx=[a-z_][a-z0-9_]{1,30}$
+
+[MESSAGES CONTROL]
+
+# Enable or disable specific messages by their symbol
+disable=W0201,C0114,R0913,R0914,R0903,R0902
+
+[FORMAT]
+
+# Specify the maximum number of characters allowed per line
+max-line-length=100
+good-names=i,j,k,v
+
+[BASIC]
+
+# Set the expected naming style for variables, functions, and classes
+class-rgx=[A-Z_][a-zA-Z0-9]+$
+
+[REPORTS]
+
+# Generate a HTML report after linting
+reports=yes
