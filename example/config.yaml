@@ -24,9 +24,9 @@ train:
     loader_params:
         shuffle: True
         batch_size: 32
-    tollerance: 10
 val:
     dataset: val
     loader_params:
         batch_size: 32
 epochs: 100
+tollerance: 10

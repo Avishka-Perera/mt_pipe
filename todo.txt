@@ -1,0 +1,2 @@
+Make train configuration optional
+bring conf.train, conf.val, conf.test under conf.loops

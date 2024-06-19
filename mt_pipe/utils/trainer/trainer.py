@@ -3,7 +3,7 @@
 import glob
 import os
 from os.path import join as ospj
-from typing import Dict, Callable, List, Tuple, Any, TypedDict
+from typing import Dict, Callable, List, Tuple
 from argparse import Namespace
 import datetime
 from abc import abstractmethod
@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 from torch.nn import Module
 
-from .utils import (
+from ..utils import (
     get_yaml_loader,
     load_conf,
     dump_conf,
@@ -28,20 +28,12 @@ from .utils import (
     get_input_mapper,
     get_nested_attr,
 )
-from .muxes import LossMux, VisualizerMux
-from .data import to_device_deep, get_collate_func, ParallelDataLoader
-from ..evaluators import Evaluator
-from ..visualizers import Visualizer
-from .logger import Logger
-
-T_mapper_config = Dict[str, List[str | int]] | List[List[str | int]]
-
-
-class T_dp_config(TypedDict):
-    loss: str  # TODO: remove any
-
-
-T_loop_config = T_dp_config | Dict[str, T_dp_config]
+from ..muxes import LossMux, VisualizerMux
+from ..data import to_device_deep, get_collate_func, ParallelDataLoader
+from ...evaluators import Evaluator
+from ...visualizers import Visualizer
+from ..logger import Logger
+from .config_shape import MainConfig
 
 
 class Trainer:
@@ -138,7 +130,7 @@ class Trainer:
                 A single entry will have a key value pair delimited by "="
                 e.g.: ["model.params.drop_rate=0.1"]
         Sets:
-            1. self.conf: DictConfig: Loaded Job Configuration
+            1. self.conf: MainConfig: Loaded Job Configuration
         Returns:
             None
         """
@@ -173,17 +165,17 @@ class Trainer:
             for k, v in inline_conf_overrides.items():
                 set_deep_key(conf, k, v)
 
-        self.conf: DictConfig = conf
+        self.conf: MainConfig = conf
 
-    def find_multimodal_datapaths(self, conf: DictConfig, multi_modal: bool) -> None:
+    def find_multimodal_datapaths(self, conf: MainConfig, multi_modal: bool) -> None:
         """Finds the datapaths related to multimodal setup
         Arguments:
-            1. conf: DictConfig: Job Configuration
+            1. conf: MainConfig: Job Configuration
             2. multi_modal: bool: Whether the setup is multi-modal or not
-        Related configuration:
-            1. conf.train: T_loop_config: Training loop configuration
-            2. conf.val: T_loop_config (Optional): Validating loop configuration
-            3. conf.train: T_loop_config (Optional): Testing loop configuration
+        Related configurations:
+            1. conf.train: LoopConfig: Training loop configuration
+            2. conf.val: LoopConfig (Optional): Validating loop configuration
+            3. conf.train: LoopConfig (Optional): Testing loop configuration
         Sets:
             1. self.train_datapaths: Tuple[str] | None: Datapaths in the training loop.
                 None if not multi-modal.
@@ -284,7 +276,7 @@ class Trainer:
 
     def load_dataloaders(
         self,
-        conf: DictConfig,
+        conf: MainConfig,
         do_val: bool,
         do_test: bool,
         multi_modal: bool = False,
@@ -294,7 +286,7 @@ class Trainer:
     ):
         """Load the dataloaders for training, validating, and testing loops
         Arguments:
-            1. conf: DictConfig: Job Configuration
+            1. conf: MainConfig: Job Configuration
             2. do_val: bool: Whether to do the validation loop
             3. do_test: bool: Whether to do the test loop
             4. multi_modal: bool = False: Whether the setup is multi-modal or not
@@ -302,7 +294,11 @@ class Trainer:
             6. val_datapaths: List[str] = None: Datapaths in the validation loop
             7. test_datapaths: List[str] = None: Datapaths in the testing loop
         Related configurations:
-            1.
+            1. conf.augmentors: Dict[str, ObjectConfig]
+            2. conf.datasets: Dict[str, ObjectConfig]
+            3. conf.train: LoopConfig
+            4. conf.val: LoopConfig
+            5. conf.test: LoopConfig
         Sets:
             1. self.train_dl: DataLoader: Training dataloader
             2. self.val_dl: DataLoader | None: Validating dataloader
@@ -358,15 +354,16 @@ class Trainer:
         self.val_dl: DataLoader | None = val_dl
         self.test_dl: DataLoader | None = test_dl
 
-    def load_model(self, conf: DictConfig, device: int) -> None:
+    def load_model(self, conf: MainConfig, device: int) -> None:
         """Loads the model
         Arguments:
-            1. conf: DictConfig: Job Configuration
+            1. conf: MainConfig: Job Configuration
             2. device: int: Device id that must be used  for the Job
-        Related configuration:
-            1. conf.model: DictConfig: Object instantion configuration
-            2. conf.model.optimizing_model: str (Optional): Defines the part of the model to be optimized
-            3. conf.model.input_map: T_mapper_config (Optional): Input mapper configuration
+        Related configurations:
+            1. conf.model: ObjectConfig: Object instantion configuration
+            2. conf.model.optimizing_model: str (Optional): Defines the part of the model
+                to be optimized
+            3. conf.model.input_map: MapperConfig (Optional): Input mapper configuration
         Sets:
             1. self.model: Module: Complete model
             2. self.model_input_mapper: Callable: Model input mapper with standard inputs ["batch"]
@@ -389,7 +386,7 @@ class Trainer:
 
     def load_loss_fns(
         self,
-        conf: DictConfig,
+        conf: MainConfig,
         multi_modal: bool,
         train_datapaths: List[str],
         val_datapaths: List[str],
@@ -479,13 +476,13 @@ class Trainer:
         self.train_loss_output_mapper = train_loss_output_mapper
         self.val_loss_output_mapper = val_loss_output_mapper
 
-    def load_optimizer(self, conf: DictConfig, optimizing_model: Module) -> None:
+    def load_optimizer(self, conf: MainConfig, optimizing_model: Module) -> None:
         optimizer: Optimizer = make_obj_from_conf(
             conf.optimizer, params=optimizing_model.parameters()
         )
         self.optimizer = optimizer
 
-    def load_lr_scheduler(self, conf: DictConfig, optimizer: Optimizer) -> None:
+    def load_lr_scheduler(self, conf: MainConfig, optimizer: Optimizer) -> None:
         if "lr_scheduler" in conf:
             lr_scheduler: LRScheduler = make_obj_from_conf(
                 conf.lr_scheduler, optimizer=optimizer
@@ -496,7 +493,7 @@ class Trainer:
 
     def load_visualizers(
         self,
-        conf: DictConfig,
+        conf: MainConfig,
         logger: Logger,
         multi_modal: bool,
         train_datapaths: Dict[str],
@@ -584,7 +581,7 @@ class Trainer:
         self.val_visualizer_mapper = val_visualizer_mapper
 
     def load_evaluator(
-        self, conf: DictConfig, do_test: bool, results_dir: str, multi_modal: bool
+        self, conf: MainConfig, do_test: bool, results_dir: str, multi_modal: bool
     ) -> None:
 
         if do_test:
@@ -623,7 +620,7 @@ class Trainer:
 
     def resume(
         self,
-        conf: DictConfig,
+        conf: MainConfig,
         resume: bool,
         force_resume: bool,
         out_dir: str,
@@ -715,11 +712,10 @@ class Trainer:
                 visualizer_in = self.train_visualizer_mapper(
                     batch=batch, model_out=model_out, epoch=epoch, loop="train"
                 )
-                (
+                if isinstance(visualizer_in, dict):
                     self.train_visualizer(**visualizer_in)
-                    if isinstance(visualizer_in, dict)
-                    else self.train_visualizer(*visualizer_in)
-                )
+                else:
+                    self.train_visualizer(*visualizer_in)
             self.logger.batch_step()
 
         train_loss = sum(losses) / len(losses)
@@ -763,11 +759,10 @@ class Trainer:
                 visualizer_in = self.val_visualizer_mapper(
                     batch=batch, model_out=model_out, epoch=epoch, loop="val"
                 )
-                (
+                if isinstance(visualizer_in, dict):
                     self.val_visualizer(**visualizer_in)
-                    if isinstance(visualizer_in, dict)
-                    else self.val_visualizer(*visualizer_in)
-                )
+                else:
+                    self.val_visualizer(*visualizer_in)
 
         self.model.train()
         val_loss = sum(losses) / len(losses)
@@ -794,11 +789,10 @@ class Trainer:
                 else self.model(*model_in)
             )
             eval_in = self.eval_input_mapper(batch=batch, model_out=model_out)
-            (
+            if isinstance(eval_in, dict):
                 self.evaluator(**eval_in)
-                if type(eval_in) == dict
-                else self.evaluator(*eval_in)
-            )
+            else:
+                self.evaluator(*eval_in)
         report = self.evaluator.export_result()
 
         self.model.train()
